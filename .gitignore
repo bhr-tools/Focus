@@ -1,0 +1,6 @@
+/timetracker
+result
+.direnv/
+*.db
+*.db-journal
+*.db-wal
