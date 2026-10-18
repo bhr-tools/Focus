@@ -2359,16 +2359,11 @@ body.auth-locked .app-container {
   }
 
   .month-toolbar {
+    display: contents !important;
+  }
+
+  .month-toolbar-info {
     display: none !important;
-  }
-
-  .month-toolbar-info .section-desc {
-    display: none;
-  }
-
-  .month-toolbar-info .section-title {
-    font-size: 17px;
-    margin: 0;
   }
 
   /* Desktop buttons inside toolbar are hidden on mobile */
@@ -2402,7 +2397,7 @@ body.auth-locked .app-container {
     max-width: 228px;
     box-sizing: border-box;
     height: 42px;
-    background: var(--surface-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
     border-radius: var(--radius-full);
@@ -2606,10 +2601,12 @@ body.auth-locked .app-container {
     width: 100%;
   }
 
+  #stats-month-stepper,
+  #stats-year-stepper,
   .period-steppers .unified-capsule-btn {
-    width: 100%;
-    min-width: 0;
-    max-width: none;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
     height: 38px;
     justify-content: space-between;
   }
