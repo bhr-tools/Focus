@@ -1,8 +1,8 @@
-# 🎯 Focus (Vibe Coded)
+# Focus
 
 **Focus** is a minimalist, self-hosted Pomodoro timer and time-tracking application engineered in **Go** with a clean **Rosé Pine** aesthetic. It combines precise interval tracking with a lightweight, offline-first architecture.
 
-## ✨ Features
+- **Vibe coded:** After using this kind of tools for 4+ years, I needed to create my own, that would do exactly what I wanted, extremely well, without the cost of opportunity of learning how to do everthing myself in a domain (web dev) where I don't want/need to be an expert.
 
 - **Dual Modes:**
     
@@ -17,7 +17,7 @@
 - **Local-First & Standalone:** A single Go binary with embedded SQLite and static assets. No heavy dependencies.
     
 
-## 🚀 Installation
+## Installation
 
 ### 1. Standalone Linux (Non-NixOS)
 
@@ -62,7 +62,7 @@ If you use Nix with flakes enabled, you can run or install Focus directly:
     ```
     
 
-## 🖥️ Waybar Integration
+## Waybar Integration
 
 Focus exposes a real-time status output designed for status bars like Waybar.
 
@@ -80,7 +80,7 @@ Add this module configuration to your `~/.config/waybar/config.jsonc`:
 }
 ```
 
-## ⌨️ CLI Command Reference
+## CLI Command Reference
 
 Manage your timer directly from the terminal or keybindings:
 
