@@ -33,7 +33,6 @@
                 mainProgram = "focus";
               };
             };
-            timetracker = focus;
             default = focus;
           };
 
@@ -42,7 +41,6 @@
               drv = self.packages.${system}.focus;
               name = "focus";
             };
-            timetracker = focus;
             default = focus;
           };
 
@@ -169,7 +167,6 @@
       nixosModules.focus = nixosModule;
       overlays.default = final: prev: {
         focus = self.packages.${final.system}.default;
-        timetracker = self.packages.${final.system}.default;
       };
     };
 }

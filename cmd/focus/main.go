@@ -355,10 +355,7 @@ func printCurrentStatus(jsonOut bool) string {
 
 
 func readStateData() ([]byte, error) {
-	if data, err := os.ReadFile(statePath); err == nil {
-		return data, nil
-	}
-	return os.ReadFile("/tmp/timetracker_state.json")
+	return os.ReadFile(statePath)
 }
 
 func getTargetServer() (string, string) {
@@ -368,12 +365,6 @@ func getTargetServer() (string, string) {
 			srvPath := filepath.Join(home, ".config", "focus", "server")
 			if data, err := os.ReadFile(srvPath); err == nil {
 				url = strings.TrimSpace(string(data))
-			} else {
-				// Legacy fallback
-				legacyPath := filepath.Join(home, ".config", "timetracker", "server")
-				if data, err := os.ReadFile(legacyPath); err == nil {
-					url = strings.TrimSpace(string(data))
-				}
 			}
 		}
 	}
@@ -381,10 +372,7 @@ func getTargetServer() (string, string) {
 		// Fallback: if token exists, user is connecting to the remote server
 		if home, err := os.UserHomeDir(); err == nil {
 			tokPath := filepath.Join(home, ".config", "focus", "token")
-			legacyTok := filepath.Join(home, ".config", "timetracker", "token")
 			if _, err := os.Stat(tokPath); err == nil {
-				url = "https://focus.bhr-sys.com"
-			} else if _, err := os.Stat(legacyTok); err == nil {
 				url = "https://focus.bhr-sys.com"
 			}
 		}
@@ -400,12 +388,6 @@ func getTargetServer() (string, string) {
 			tokPath := filepath.Join(home, ".config", "focus", "token")
 			if data, err := os.ReadFile(tokPath); err == nil {
 				token = strings.TrimSpace(string(data))
-			} else {
-				// Legacy fallback
-				legacyTok := filepath.Join(home, ".config", "timetracker", "token")
-				if data, err := os.ReadFile(legacyTok); err == nil {
-					token = strings.TrimSpace(string(data))
-				}
 			}
 		}
 	}

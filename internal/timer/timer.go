@@ -389,8 +389,6 @@ func (e *Engine) writeStateFile(snap StateSnapshot) {
 	if err := os.WriteFile(tmpPath, data, 0644); err == nil {
 		_ = os.Rename(tmpPath, statePath)
 	}
-	// Also maintain legacy path for smooth transition
-	_ = os.WriteFile("/tmp/timetracker_state.json", data, 0644)
 }
 
 func (e *Engine) triggerAlarm(title, message string) {
@@ -437,18 +435,18 @@ func (e *Engine) Start(project, mode, originClientID string) StateSnapshot {
 	e.status = "running"
 	e.lastAlertID = 0
 	e.alertType = ""
+	e.elapsedSeconds = 0
+	e.accumulatedWorkSec = 0
 	e.sessionStartTime = time.Now()
 	e.activeWorkStart = time.Now()
 
 	if e.mode == "pomodoro" {
 		e.phase = "work"
 		e.totalSeconds = e.workDurationMin * 60
-		e.elapsedSeconds = 0
 		e.remainingSeconds = e.totalSeconds
 	} else {
 		e.phase = "work"
 		e.totalSeconds = 0
-		e.elapsedSeconds = 0
 		e.remainingSeconds = 0
 	}
 

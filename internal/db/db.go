@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -113,30 +112,9 @@ type DB struct {
 	conn *sql.DB
 }
 
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	if _, err = io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Sync()
-}
-
 func Open(dbPath string) (*DB, error) {
-	var legacyDb string
-	home, _ := os.UserHomeDir()
-
 	if dbPath == "" {
+		home, _ := os.UserHomeDir()
 		if home == "" {
 			return nil, fmt.Errorf("user home directory not found")
 		}
@@ -145,27 +123,10 @@ func Open(dbPath string) (*DB, error) {
 			return nil, err
 		}
 		dbPath = filepath.Join(dataDir, "focus.db")
-		legacyDb = filepath.Join(home, ".local", "share", "timetracker", "timetracker.db")
 	} else {
 		dir := filepath.Dir(dbPath)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, err
-		}
-		// If dbPath is .../focus.db, check for timetracker.db in the same directory
-		// If dbPath is .../focus.db, check for timetracker.db in the same directory
-		if filepath.Base(dbPath) == "focus.db" {
-			legacyDb = filepath.Join(dir, "timetracker.db")
-		}
-	}
-
-	// 1. If target dbPath does not exist and legacyDb exists, copy it over!
-	if legacyDb != "" && dbPath != legacyDb {
-		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-			if _, errLegacy := os.Stat(legacyDb); errLegacy == nil {
-				_ = copyFile(legacyDb, dbPath)
-				_ = copyFile(legacyDb+"-wal", dbPath+"-wal")
-				_ = copyFile(legacyDb+"-shm", dbPath+"-shm")
-			}
 		}
 	}
 
@@ -188,32 +149,6 @@ func Open(dbPath string) (*DB, error) {
 	if err := database.initSchema(); err != nil {
 		conn.Close()
 		return nil, err
-	}
-
-	// 2. If focus.db was created empty (0 sessions) but legacyDb exists and has sessions, auto-restore!
-	if legacyDb != "" && dbPath != legacyDb {
-		var sessionCount int
-		_ = database.conn.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&sessionCount)
-		if sessionCount == 0 {
-			if legacyConn, errLeg := sql.Open("sqlite", legacyDb); errLeg == nil {
-				var legacyCount int
-				_ = legacyConn.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&legacyCount)
-				legacyConn.Close()
-				if legacyCount > 0 {
-					_ = database.Close()
-					_ = copyFile(legacyDb, dbPath)
-					_ = copyFile(legacyDb+"-wal", dbPath+"-wal")
-					_ = copyFile(legacyDb+"-shm", dbPath+"-shm")
-
-					conn, err = sql.Open("sqlite", dbPath)
-					if err != nil {
-						return nil, err
-					}
-					database = &DB{conn: conn}
-					_ = database.initSchema()
-				}
-			}
-		}
 	}
 
 	return database, nil
