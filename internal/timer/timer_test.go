@@ -32,7 +32,9 @@ func TestEngineStopRecordsSession(t *testing.T) {
 
 	// Simulate elapsed time
 	engine.mu.Lock()
+	engine.accumulatedWorkSec = 120
 	engine.elapsedSeconds = 120
+	engine.activeWorkStart = time.Now()
 	engine.sessionStartTime = time.Now().Add(-120 * time.Second)
 	engine.mu.Unlock()
 
@@ -67,11 +69,13 @@ func TestEngineTickRecordsPomodoroSession(t *testing.T) {
 	// Start a pomodoro session
 	engine.Start("API Architecture", "pomodoro", "client-1")
 
-	// Fast forward timer to 1 second remaining
+	// Fast forward timer so tick completes the phase
 	engine.mu.Lock()
-	engine.remainingSeconds = 1
+	engine.accumulatedWorkSec = 1500
 	engine.elapsedSeconds = 1500
 	engine.totalSeconds = 1500
+	engine.remainingSeconds = 0
+	engine.activeWorkStart = time.Now()
 	engine.sessionStartTime = time.Now().Add(-1500 * time.Second)
 	engine.mu.Unlock()
 
@@ -100,7 +104,7 @@ func TestEngineTickRecordsPomodoroSession(t *testing.T) {
 	if sessions[0].ProjectName != "API Architecture" {
 		t.Errorf("expected project 'API Architecture', got '%s'", sessions[0].ProjectName)
 	}
-	if sessions[0].DurationSeconds != 1501 {
-		t.Errorf("expected duration 1501s, got %d", sessions[0].DurationSeconds)
+	if sessions[0].DurationSeconds != 1500 {
+		t.Errorf("expected duration 1500s, got %d", sessions[0].DurationSeconds)
 	}
 }

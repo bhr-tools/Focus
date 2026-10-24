@@ -180,22 +180,26 @@ func (e *Engine) tick() {
 		return
 	}
 
+	curActive := int(time.Since(e.activeWorkStart).Seconds())
+	if curActive < 0 {
+		curActive = 0
+	}
+	e.elapsedSeconds = e.accumulatedWorkSec + curActive
+	if e.mode == "pomodoro" {
+		e.remainingSeconds = e.totalSeconds - e.elapsedSeconds
+	} else if e.mode == "free" {
+		e.remainingSeconds = 0
+	}
+
 	var sessionCommitted bool
 	if e.mode == "pomodoro" {
-		e.elapsedSeconds++
-		e.remainingSeconds = e.totalSeconds - e.elapsedSeconds
-
-		if e.phase == "work" {
-			e.accumulatedWorkSec++
-		}
-
 		if e.remainingSeconds <= 0 {
 			// Phase finished!
 			if e.phase == "work" {
 				// Work session over
-				workStart := e.sessionStartTime
+				dur := e.totalSeconds
 				workEnd := time.Now()
-				dur := e.elapsedSeconds
+				workStart := workEnd.Add(-time.Duration(dur) * time.Second)
 				proj := e.project
 
 				if _, err := e.db.RecordSession(db.Session{
@@ -222,6 +226,7 @@ func (e *Engine) tick() {
 				e.remainingSeconds = e.totalSeconds
 				e.status = "paused"
 				e.sessionStartTime = time.Now()
+				e.activeWorkStart = time.Time{}
 				e.accumulatedWorkSec = 0
 			} else {
 				// Break over
@@ -238,13 +243,10 @@ func (e *Engine) tick() {
 				e.remainingSeconds = e.totalSeconds
 				e.status = "paused"
 				e.sessionStartTime = time.Now()
+				e.activeWorkStart = time.Time{}
 				e.accumulatedWorkSec = 0
 			}
 		}
-	} else if e.mode == "free" {
-		e.elapsedSeconds++
-		e.accumulatedWorkSec++
-		e.remainingSeconds = 0
 	}
 
 	snap := e.snapshotLocked()
@@ -462,6 +464,11 @@ func (e *Engine) Pause() StateSnapshot {
 
 	if e.status == "running" {
 		e.status = "paused"
+		if !e.activeWorkStart.IsZero() {
+			e.accumulatedWorkSec += int(time.Since(e.activeWorkStart).Seconds())
+			e.activeWorkStart = time.Time{}
+		}
+		e.elapsedSeconds = e.accumulatedWorkSec
 	}
 
 	snap := e.snapshotLocked()
@@ -512,11 +519,17 @@ func (e *Engine) Toggle(originClientID string) StateSnapshot {
 func (e *Engine) Stop() StateSnapshot {
 	e.mu.Lock()
 
+	if e.status == "running" && !e.activeWorkStart.IsZero() {
+		e.accumulatedWorkSec += int(time.Since(e.activeWorkStart).Seconds())
+		e.activeWorkStart = time.Time{}
+	}
+	e.elapsedSeconds = e.accumulatedWorkSec
+
 	var sessionCommitted bool
 	if (e.mode == "free" || (e.mode == "pomodoro" && e.phase == "work")) && e.elapsedSeconds > 0 {
-		workStart := e.sessionStartTime
-		workEnd := time.Now()
 		dur := e.elapsedSeconds
+		workEnd := time.Now()
+		workStart := workEnd.Add(-time.Duration(dur) * time.Second)
 		proj := e.project
 		mod := e.mode
 
@@ -540,6 +553,8 @@ func (e *Engine) Stop() StateSnapshot {
 	e.alertType = ""
 	e.originClientID = ""
 	e.elapsedSeconds = 0
+	e.accumulatedWorkSec = 0
+	e.activeWorkStart = time.Time{}
 	if e.mode == "pomodoro" {
 		e.phase = "work"
 		e.totalSeconds = e.workDurationMin * 60
@@ -568,13 +583,19 @@ func (e *Engine) Next() StateSnapshot {
 		return e.Stop()
 	}
 
+	if e.status == "running" && !e.activeWorkStart.IsZero() {
+		e.accumulatedWorkSec += int(time.Since(e.activeWorkStart).Seconds())
+		e.activeWorkStart = time.Time{}
+	}
+	e.elapsedSeconds = e.accumulatedWorkSec
+
 	var sessionCommitted bool
 	if e.phase == "work" {
 		// Save current work session if any time elapsed
 		if e.elapsedSeconds > 0 {
-			workStart := e.sessionStartTime
-			workEnd := time.Now()
 			dur := e.elapsedSeconds
+			workEnd := time.Now()
+			workStart := workEnd.Add(-time.Duration(dur) * time.Second)
 			proj := e.project
 			if _, err := e.db.RecordSession(db.Session{
 				ProjectName:     proj,
@@ -598,6 +619,8 @@ func (e *Engine) Next() StateSnapshot {
 		e.lastAlertID = 0
 		e.alertType = ""
 		e.sessionStartTime = time.Now()
+		e.accumulatedWorkSec = 0
+		e.activeWorkStart = time.Time{}
 	} else {
 		// From break to work
 		e.phase = "work"
@@ -608,6 +631,8 @@ func (e *Engine) Next() StateSnapshot {
 		e.lastAlertID = 0
 		e.alertType = ""
 		e.sessionStartTime = time.Now()
+		e.accumulatedWorkSec = 0
+		e.activeWorkStart = time.Time{}
 	}
 
 	snap := e.snapshotLocked()
@@ -631,6 +656,8 @@ func (e *Engine) Cancel() StateSnapshot {
 	e.alertType = ""
 	e.originClientID = ""
 	e.elapsedSeconds = 0
+	e.accumulatedWorkSec = 0
+	e.activeWorkStart = time.Time{}
 	if e.mode == "pomodoro" {
 		e.phase = "work"
 		e.totalSeconds = e.workDurationMin * 60

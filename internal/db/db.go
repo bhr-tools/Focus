@@ -373,11 +373,14 @@ func (d *DB) RecordSession(s Session) (*Session, error) {
 	}
 	s.ProjectColor = p.Color
 
-	if s.DurationSeconds <= 0 {
+	if s.DurationSeconds > 0 {
+		s.StartTime = s.EndTime.Add(-time.Duration(s.DurationSeconds) * time.Second)
+	} else {
 		s.DurationSeconds = int(s.EndTime.Sub(s.StartTime).Seconds())
-	}
-	if s.DurationSeconds <= 0 {
-		s.DurationSeconds = 1
+		if s.DurationSeconds <= 0 {
+			s.DurationSeconds = 1
+		}
+		s.StartTime = s.EndTime.Add(-time.Duration(s.DurationSeconds) * time.Second)
 	}
 
 	completedVal := 0
