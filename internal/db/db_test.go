@@ -367,6 +367,19 @@ func TestImportDeduplicatesAndSkipsInvalid(t *testing.T) {
 	}
 }
 
+func TestSessionDurationIsBounded(t *testing.T) {
+	database := setupTestDB(t)
+	now := time.Now()
+	if _, err := database.RecordSession(Session{ProjectName: "X", EndTime: now, DurationSeconds: 8 * 24 * 3600}); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("expected ErrInvalidSession, got %v", err)
+	}
+	// Extreme bounds must not overflow into an accepted negative duration.
+	huge := Session{ProjectName: "X", StartTime: time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC), EndTime: time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)}
+	if imported, skipped, err := database.ImportSessions([]Session{huge}); err != nil || imported != 0 || skipped != 1 {
+		t.Fatalf("huge session should be skipped: %d imported, %d skipped (err %v)", imported, skipped, err)
+	}
+}
+
 func TestParseTimewarrior(t *testing.T) {
 	data := `[{"id":1,"start":"20260105T090000Z","end":"20260105T100000Z","tags":["Maths","x"]},
 	          {"id":2,"start":"20260105T110000Z","tags":["Open"]}]`

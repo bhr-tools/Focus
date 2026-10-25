@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"focus/internal/db"
+	"focus/internal/paths"
 	"focus/internal/server"
 	"focus/internal/timer"
 	"focus/web"
@@ -122,8 +123,13 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// localTokenPath is the per-user file holding the local daemon's CLI token.
 func localTokenPath() string {
-	return filepath.Join(os.TempDir(), "focus_local_token")
+	path, err := paths.File("local_token")
+	if err != nil {
+		return ""
+	}
+	return path
 }
 
 func runDaemon(args []string) {
@@ -146,15 +152,20 @@ func runDaemon(args []string) {
 	engine := timer.NewEngine(database, timer.StateFilePath())
 	defer engine.Close()
 
-	// The local token lets the CLI of this host talk to a password-protected daemon.
+	// The local token lets the CLI of the same user talk to a password-protected
+	// daemon. A generated token that cannot be stored privately is disabled.
 	token := os.Getenv("FOCUS_TOKEN")
 	if token == "" {
-		b := make([]byte, 16)
+		b := make([]byte, 32)
 		_, _ = rand.Read(b)
 		token = hex.EncodeToString(b)
-	}
-	if err := os.WriteFile(localTokenPath(), []byte(token), 0o600); err != nil {
-		log.Printf("warning: cannot write local CLI token: %v", err)
+		path := localTokenPath()
+		if path == "" {
+			token = ""
+		} else if err := paths.WriteFileAtomic(path, []byte(token)); err != nil {
+			log.Printf("warning: local CLI token disabled: %v", err)
+			token = ""
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -215,23 +226,33 @@ func readTrimmed(path string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// target returns the server URL and token used by the CLI.
+// target returns the server URL and the token to send to it. A credential is
+// only ever sent to the server it belongs to: $FOCUS_TOKEN is explicit, the
+// token saved by 'focus login' goes to the saved server only, and the local
+// daemon's token to the local daemon only.
 func target() (serverURL, token string) {
-	serverURL = os.Getenv("FOCUS_SERVER")
-	if serverURL == "" && configDir() != "" {
-		serverURL = readTrimmed(filepath.Join(configDir(), "server"))
+	savedServer, savedToken := "", ""
+	if dir := configDir(); dir != "" {
+		savedServer = strings.TrimRight(readTrimmed(filepath.Join(dir, "server")), "/")
+		savedToken = readTrimmed(filepath.Join(dir, "token"))
+	}
+	serverURL = strings.TrimRight(os.Getenv("FOCUS_SERVER"), "/")
+	if serverURL == "" {
+		serverURL = savedServer
 	}
 	if serverURL == "" {
 		serverURL = localURL
 	}
-	token = os.Getenv("FOCUS_TOKEN")
-	if token == "" && configDir() != "" {
-		token = readTrimmed(filepath.Join(configDir(), "token"))
-	}
-	if token == "" {
+
+	switch {
+	case os.Getenv("FOCUS_TOKEN") != "":
+		token = os.Getenv("FOCUS_TOKEN")
+	case savedToken != "" && serverURL == savedServer:
+		token = savedToken
+	case isLocal(serverURL):
 		token = readTrimmed(localTokenPath())
 	}
-	return strings.TrimRight(serverURL, "/"), token
+	return serverURL, token
 }
 
 func isLocal(serverURL string) bool {

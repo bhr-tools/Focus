@@ -128,7 +128,13 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
+// serverError answers 400 for invalid input reported by the database layer,
+// 500 otherwise.
 func serverError(w http.ResponseWriter, err error) {
+	if errors.Is(err, db.ErrInvalidSession) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	log.Printf("server: %v", err)
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }

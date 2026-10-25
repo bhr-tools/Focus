@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"focus/internal/db"
+	"focus/internal/paths"
 )
 
 // Statuses and phases.
@@ -58,9 +59,15 @@ type StateSnapshot struct {
 	OriginClientID   string `json:"origin_client_id,omitempty"` // client that started the session
 }
 
-// StateFilePath is where the daemon mirrors its state for the CLI.
+// StateFilePath is where the daemon mirrors its state for the CLI of the same
+// user; "" when no private directory is available (the file is then skipped).
 func StateFilePath() string {
-	return filepath.Join(os.TempDir(), "focus_state.json")
+	path, err := paths.File("state.json")
+	if err != nil {
+		log.Printf("timer: no state file: %v", err)
+		return ""
+	}
+	return path
 }
 
 type Engine struct {
@@ -222,8 +229,9 @@ func (e *Engine) phaseTotalLocked() time.Duration {
 }
 
 // recordLocked saves a work session of the given length ending at end.
+// A forgotten stopwatch keeps its last db.MaxSessionDuration.
 func (e *Engine) recordLocked(length time.Duration, end time.Time) {
-	secs := int(length.Round(time.Second) / time.Second)
+	secs := int(min(length, db.MaxSessionDuration).Round(time.Second) / time.Second)
 	if secs <= 0 {
 		return
 	}
@@ -549,11 +557,8 @@ func (e *Engine) writeStateFile(snap StateSnapshot) {
 	if err != nil {
 		return
 	}
-	tmp := e.statePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, e.statePath)
+	// Best effort: the CLI falls back to the HTTP API (and this runs every second).
+	_ = paths.WriteFileAtomic(e.statePath, data)
 }
 
 // ==================== Host integration ====================

@@ -21,6 +21,13 @@ import (
 // ErrNotFound is returned when the targeted row does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrInvalidSession is returned for a session longer than MaxSessionDuration.
+var ErrInvalidSession = errors.New("invalid session")
+
+// MaxSessionDuration bounds a session, which also bounds the per-hour
+// statistics work done for any stored row.
+const MaxSessionDuration = 7 * 24 * time.Hour
+
 // RosePinePalette is the ordered list of colors assigned to new projects.
 var RosePinePalette = []string{
 	"#eb6f92", // Love

@@ -127,7 +127,7 @@ func (d *DB) ImportSessions(sessions []Session) (imported, skipped int, err erro
 		if s.DurationSeconds <= 0 {
 			s.DurationSeconds = int(s.EndTime.Sub(s.StartTime).Seconds())
 		}
-		if s.DurationSeconds <= 0 {
+		if s.DurationSeconds <= 0 || checkDuration(s.DurationSeconds) != nil {
 			skipped++
 			continue
 		}

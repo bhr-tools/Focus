@@ -144,6 +144,9 @@ func (d *DB) RecordSession(s Session) (*Session, error) {
 	if s.DurationSeconds <= 0 {
 		s.DurationSeconds = max(int(s.EndTime.Sub(s.StartTime).Round(time.Second)/time.Second), 1)
 	}
+	if err := checkDuration(s.DurationSeconds); err != nil {
+		return nil, err
+	}
 	s.EndTime = s.EndTime.Truncate(time.Second)
 	s.StartTime = s.EndTime.Add(-time.Duration(s.DurationSeconds) * time.Second)
 	s.UpdatedAt = time.Now().Truncate(time.Second)
@@ -172,6 +175,13 @@ func (d *DB) RecordSession(s Session) (*Session, error) {
 	return &s, nil
 }
 
+func checkDuration(seconds int) error {
+	if seconds > int(MaxSessionDuration/time.Second) { // compared in seconds: no overflow
+		return fmt.Errorf("%w: a session cannot last more than %v", ErrInvalidSession, MaxSessionDuration)
+	}
+	return nil
+}
+
 // UpdateSession changes the project and interval of an existing session.
 func (d *DB) UpdateSession(id int64, projectName string, startTime, endTime time.Time) (*Session, error) {
 	p, err := d.GetOrCreateProject(projectName)
@@ -181,6 +191,9 @@ func (d *DB) UpdateSession(id int64, projectName string, startTime, endTime time
 	startTime = startTime.Truncate(time.Second)
 	endTime = endTime.Truncate(time.Second)
 	duration := max(int(endTime.Sub(startTime).Seconds()), 1)
+	if err := checkDuration(duration); err != nil {
+		return nil, err
+	}
 	endTime = startTime.Add(time.Duration(duration) * time.Second)
 
 	res, err := d.conn.Exec(
