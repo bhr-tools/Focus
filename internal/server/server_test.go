@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,237 +17,295 @@ import (
 	"focus/web"
 )
 
-func setupTestServer(t *testing.T) (*Server, *db.DB) {
+func setupTestServer(t *testing.T) (http.Handler, *db.DB) {
 	t.Helper()
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test_server.db")
-	database, err := db.Open(dbPath)
+	database, err := db.Open(filepath.Join(t.TempDir(), "test_server.db"))
 	if err != nil {
 		t.Fatalf("failed to open test db: %v", err)
 	}
+	engine := timer.NewEngine(database, "")
 	t.Cleanup(func() {
+		engine.Close()
 		database.Close()
 	})
+	return NewServer(database, engine, web.Files, "local-secret").Handler(), database
+}
 
-	timerEngine := timer.NewEngine(database)
-	srv := NewServer(database, timerEngine, web.Files)
-	return srv, database
+// call performs a request and returns the recorder; body may be nil, a string or any JSON value.
+func call(t *testing.T, h http.Handler, method, path string, body any, headers ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	switch b := body.(type) {
+	case nil:
+	case string:
+		reader = strings.NewReader(b)
+	default:
+		data, _ := json.Marshal(b)
+		reader = bytes.NewReader(data)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func decode[T any](t *testing.T, w *httptest.ResponseRecorder) T {
+	t.Helper()
+	var v T
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatalf("invalid JSON response %q: %v", w.Body.String(), err)
+	}
+	return v
 }
 
 func TestAPISessionsCRUD(t *testing.T) {
-	srv, database := setupTestServer(t)
-
+	h, database := setupTestServer(t)
 	now := time.Now().UTC().Truncate(time.Second)
 
-	// 1. Create session via POST /api/sessions
-	payload := map[string]interface{}{
+	w := call(t, h, http.MethodPost, "/api/sessions", map[string]any{
 		"project_name": "Frontend Engineering",
 		"start_time":   now.Add(-45 * time.Minute).Format(time.RFC3339),
 		"end_time":     now.Format(time.RFC3339),
 		"mode":         "pomodoro",
-	}
-
-	body, _ := json.Marshal(payload)
-	req := httptest.NewRequest(http.MethodPost, "/api/sessions", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-
-	srv.handleSessionDetail(w, req)
-
+	})
 	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
-
-	var created db.Session
-	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
-		t.Fatalf("failed to parse response JSON: %v", err)
-	}
-	if created.ID == 0 || created.ProjectName != "Frontend Engineering" {
+	created := decode[db.Session](t, w)
+	if created.ID == 0 || created.ProjectName != "Frontend Engineering" || created.DurationSeconds != 2700 {
 		t.Fatalf("unexpected created session: %+v", created)
 	}
 
-	// 2. Update session via PUT /api/sessions/{id}
-	updatePayload := map[string]interface{}{
+	w = call(t, h, http.MethodPut, fmt.Sprintf("/api/sessions/%d", created.ID), map[string]any{
 		"project_name": "Frontend Engineering Refactored",
 		"start_time":   now.Add(-50 * time.Minute).Format(time.RFC3339),
 		"end_time":     now.Format(time.RFC3339),
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", w.Code, w.Body.String())
 	}
-	updateBody, _ := json.Marshal(updatePayload)
-	updateReq := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/sessions/%d", created.ID), bytes.NewReader(updateBody))
-	updateW := httptest.NewRecorder()
-
-	srv.handleSessionDetail(updateW, updateReq)
-	if updateW.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on update, got %d: %s", updateW.Code, updateW.Body.String())
+	if s := decode[db.Session](t, w); s.DurationSeconds != 3000 || s.ProjectName != "Frontend Engineering Refactored" {
+		t.Fatalf("unexpected updated session: %+v", s)
 	}
 
-	// 3. Delete session via DELETE /api/sessions/{id}
-	delReq := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/sessions/%d", created.ID), nil)
-	delW := httptest.NewRecorder()
-
-	srv.handleSessionDetail(delW, delReq)
-	if delW.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on delete, got %d: %s", delW.Code, delW.Body.String())
+	if w := call(t, h, http.MethodPut, "/api/sessions/999", map[string]any{"start_time": "2026-01-01T10:00", "end_time": "2026-01-01T11:00"}); w.Code != http.StatusNotFound {
+		t.Errorf("update of a missing session: expected 404, got %d", w.Code)
 	}
 
-	all, _ := database.GetAllSessions()
-	if len(all) != 0 {
+	if w := call(t, h, http.MethodDelete, fmt.Sprintf("/api/sessions/%d", created.ID), nil); w.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", w.Code, w.Body.String())
+	}
+	if w := call(t, h, http.MethodDelete, fmt.Sprintf("/api/sessions/%d", created.ID), nil); w.Code != http.StatusNotFound {
+		t.Errorf("second delete: expected 404, got %d", w.Code)
+	}
+	if all, _ := database.GetAllSessions(); len(all) != 0 {
 		t.Fatalf("expected 0 sessions after delete, got %d", len(all))
 	}
 }
 
 func TestParseFlexibleTime(t *testing.T) {
-	// 1. RFC3339 & RFC3339Nano
-	t1, err := parseFlexibleTime("2026-10-15T14:30:00Z")
-	if err != nil || t1.Year() != 2026 || t1.Minute() != 30 {
-		t.Errorf("RFC3339 parse failed: %v, time: %v", err, t1)
+	cases := []struct {
+		in    any
+		check func(time.Time) bool
+	}{
+		{"2026-10-15T14:30:00Z", func(t time.Time) bool { return t.Year() == 2026 && t.Minute() == 30 }},
+		{"2026-10-15T14:30:00.999Z", func(t time.Time) bool { return t.Nanosecond() >= 900000000 }},
+		{"2026-10-15T14:30:05", func(t time.Time) bool { return t.Second() == 5 && t.Location() == time.Local }},
+		{"2026-10-15T14:30", func(t time.Time) bool { return t.Minute() == 30 && t.Location() == time.Local }},
+		{"2026-10-15 14:30:05", func(t time.Time) bool { return t.Second() == 5 && t.Location() == time.Local }},
+		{int64(1792065842), func(t time.Time) bool { return t.Unix() == 1792065842 }},
+		{float64(1792065842), func(t time.Time) bool { return t.Unix() == 1792065842 }},
+		{int64(1792065842000), func(t time.Time) bool { return t.Unix() == 1792065842 }},
+		{"1792065842000", func(t time.Time) bool { return t.Unix() == 1792065842 }},
 	}
-	t2, err := parseFlexibleTime("2026-10-15T14:30:00.999Z")
-	if err != nil || t2.Nanosecond() < 900000000 {
-		t.Errorf("RFC3339Nano parse failed: %v, time: %v", err, t2)
+	for _, c := range cases {
+		got, err := parseFlexibleTime(c.in)
+		if err != nil || !c.check(got) {
+			t.Errorf("parseFlexibleTime(%v) = %v, %v", c.in, got, err)
+		}
 	}
-
-	// 2. ISO local format from <input type="datetime-local">
-	t3, err := parseFlexibleTime("2026-10-15T14:30:05")
-	if err != nil || t3.Second() != 5 || t3.Location() != time.Local {
-		t.Errorf("ISO datetime-local with seconds failed: %v, time: %v", err, t3)
-	}
-	t4, err := parseFlexibleTime("2026-10-15T14:30")
-	if err != nil || t4.Minute() != 30 || t4.Location() != time.Local {
-		t.Errorf("ISO datetime-local without seconds failed: %v, time: %v", err, t4)
-	}
-
-	// 3. Standard SQL format
-	t5, err := parseFlexibleTime("2026-10-15 14:30:05")
-	if err != nil || t5.Second() != 5 || t5.Location() != time.Local {
-		t.Errorf("SQL format failed: %v, time: %v", err, t5)
-	}
-
-	// 4. Numeric unix timestamp in seconds (int64 / float64)
-	unixSec := int64(1792065842)
-	t6, err := parseFlexibleTime(unixSec)
-	if err != nil || t6.Unix() != unixSec {
-		t.Errorf("Unix seconds int64 failed: %v, time: %v", err, t6)
-	}
-	t7, err := parseFlexibleTime(float64(unixSec))
-	if err != nil || t7.Unix() != unixSec {
-		t.Errorf("Unix seconds float64 failed: %v, time: %v", err, t7)
-	}
-
-	// 5. Numeric unix timestamp in milliseconds (int64 / float64)
-	unixMilli := int64(1792065842000)
-	t8, err := parseFlexibleTime(unixMilli)
-	if err != nil || t8.Unix() != unixSec {
-		t.Errorf("Unix millis int64 failed: %v, time: %v", err, t8)
-	}
-	t9, err := parseFlexibleTime(float64(unixMilli))
-	if err != nil || t9.Unix() != unixSec {
-		t.Errorf("Unix millis float64 failed: %v, time: %v", err, t9)
+	if _, err := parseFlexibleTime("not a date"); err == nil {
+		t.Error("expected an error for garbage input")
 	}
 }
 
 func TestAPISessionsResilient(t *testing.T) {
-	srv, database := setupTestServer(t)
-
-	// 1. Accept 'project' instead of 'project_name', and 'startTime'/'endTime' instead of 'start_time'/'end_time'
-	// using datetime-local format
-	p1 := map[string]interface{}{
-		"project":   "Backend Engineering",
-		"startTime": "2026-10-15T10:00",
-		"endTime":   "2026-10-15T11:00",
-	}
-	b1, _ := json.Marshal(p1)
-	req1 := httptest.NewRequest(http.MethodPost, "/api/sessions", bytes.NewReader(b1))
-	w1 := httptest.NewRecorder()
-	srv.handleSessionDetail(w1, req1)
-	if w1.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w1.Code, w1.Body.String())
-	}
-	var s1 db.Session
-	_ = json.Unmarshal(w1.Body.Bytes(), &s1)
-	if s1.ProjectName != "Backend Engineering" || s1.DurationSeconds != 3600 {
-		t.Errorf("unexpected session s1: %+v", s1)
-	}
-
-	// 2. Accept SQL format dates and 'duration_seconds <= 0'
-	p2 := map[string]interface{}{
-		"project_name":     "Systems Architecture",
-		"start_time":       "2026-10-15 12:00:00",
-		"end_time":         "2026-10-15 12:30:00",
-		"duration_seconds": -1,
-	}
-	b2, _ := json.Marshal(p2)
-	req2 := httptest.NewRequest(http.MethodPost, "/api/sessions", bytes.NewReader(b2))
-	w2 := httptest.NewRecorder()
-	srv.handleSessionDetail(w2, req2)
-	if w2.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w2.Code, w2.Body.String())
-	}
-	var s2 db.Session
-	_ = json.Unmarshal(w2.Body.Bytes(), &s2)
-	if s2.DurationSeconds != 1800 {
-		t.Errorf("expected duration 1800s, got %d", s2.DurationSeconds)
-	}
-
-	// 3. Fallback to 60s minimum if end_time == start_time
-	p3 := map[string]interface{}{
-		"project":    "Quick Log",
-		"start_time": "2026-10-15T14:00:00Z",
-		"end_time":   "2026-10-15T14:00:00Z",
-	}
-	b3, _ := json.Marshal(p3)
-	req3 := httptest.NewRequest(http.MethodPost, "/api/sessions", bytes.NewReader(b3))
-	w3 := httptest.NewRecorder()
-	srv.handleSessionDetail(w3, req3)
-	if w3.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w3.Code, w3.Body.String())
-	}
-	var s3 db.Session
-	_ = json.Unmarshal(w3.Body.Bytes(), &s3)
-	if s3.DurationSeconds != 60 {
-		t.Errorf("expected 60s fallback duration, got %d", s3.DurationSeconds)
-	}
-
-	// 4. Inverted start and end time (end_time before start_time)
-	p4 := map[string]interface{}{
-		"project_name": "Inverted Time",
-		"start_time":   "2026-10-15T16:00:00Z",
-		"end_time":     "2026-10-15T15:00:00Z",
-	}
-	b4, _ := json.Marshal(p4)
-	req4 := httptest.NewRequest(http.MethodPost, "/api/sessions", bytes.NewReader(b4))
-	w4 := httptest.NewRecorder()
-	srv.handleSessionDetail(w4, req4)
-	if w4.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w4.Code, w4.Body.String())
-	}
-	var s4 db.Session
-	_ = json.Unmarshal(w4.Body.Bytes(), &s4)
-	if s4.DurationSeconds != 3600 {
-		t.Errorf("expected 3600s duration for inverted start/end, got %d", s4.DurationSeconds)
-	}
-
-	// 5. Unix timestamp in milliseconds
+	h, database := setupTestServer(t)
 	nowMilli := time.Now().UnixMilli()
-	p5 := map[string]interface{}{
-		"project":   "Timestamp Test",
-		"startTime": nowMilli - 300000, // 5 min ago
-		"endTime":   nowMilli,
+
+	cases := []struct {
+		name    string
+		payload map[string]any
+		want    int
+	}{
+		{"alt keys, datetime-local", map[string]any{"project": "Backend", "startTime": "2026-10-15T10:00", "endTime": "2026-10-15T11:00"}, 3600},
+		{"SQL dates, negative duration", map[string]any{"project_name": "Systems", "start_time": "2026-10-15 12:00:00", "end_time": "2026-10-15 12:30:00", "duration_seconds": -1}, 1800},
+		{"empty interval", map[string]any{"project": "Quick", "start_time": "2026-10-15T14:00:00Z", "end_time": "2026-10-15T14:00:00Z"}, 60},
+		{"inverted interval", map[string]any{"project_name": "Inverted", "start_time": "2026-10-15T16:00:00Z", "end_time": "2026-10-15T15:00:00Z"}, 3600},
+		{"unix millis", map[string]any{"project": "Timestamp", "startTime": nowMilli - 300000, "endTime": nowMilli}, 300},
 	}
-	b5, _ := json.Marshal(p5)
-	req5 := httptest.NewRequest(http.MethodPost, "/api/sessions", bytes.NewReader(b5))
-	w5 := httptest.NewRecorder()
-	srv.handleSessionDetail(w5, req5)
-	if w5.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d: %s", w5.Code, w5.Body.String())
+	for _, c := range cases {
+		w := call(t, h, http.MethodPost, "/api/sessions", c.payload)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", c.name, w.Code, w.Body.String())
+		}
+		if s := decode[db.Session](t, w); s.DurationSeconds != c.want {
+			t.Errorf("%s: expected %ds, got %d", c.name, c.want, s.DurationSeconds)
+		}
 	}
-	var s5 db.Session
-	_ = json.Unmarshal(w5.Body.Bytes(), &s5)
-	if s5.DurationSeconds != 300 {
-		t.Errorf("expected 300s duration for millis timestamp, got %d", s5.DurationSeconds)
+	if w := call(t, h, http.MethodPost, "/api/sessions", map[string]any{"project": "x", "start_time": "2026-10-15T10:00"}); w.Code != http.StatusBadRequest {
+		t.Errorf("missing end_time: expected 400, got %d", w.Code)
+	}
+	if all, _ := database.GetAllSessions(); len(all) != len(cases) {
+		t.Fatalf("expected %d sessions, got %d", len(cases), len(all))
+	}
+}
+
+func TestAuthFlow(t *testing.T) {
+	h, _ := setupTestServer(t)
+
+	// No password yet: the API is open.
+	if w := call(t, h, http.MethodGet, "/api/state", nil); w.Code != http.StatusOK {
+		t.Fatalf("open API: expected 200, got %d", w.Code)
 	}
 
-	all, err := database.GetAllSessions()
-	if err != nil || len(all) != 5 {
-		t.Fatalf("expected 5 sessions in db, got %d (err: %v)", len(all), err)
+	w := call(t, h, http.MethodPost, "/api/auth/setup", map[string]string{"password": " s3cret "})
+	if w.Code != http.StatusOK {
+		t.Fatalf("setup: %d %s", w.Code, w.Body.String())
+	}
+	token := decode[map[string]any](t, w)["token"].(string)
+	if w := call(t, h, http.MethodPost, "/api/auth/setup", map[string]string{"password": "other"}); w.Code != http.StatusConflict {
+		t.Errorf("second setup: expected 409, got %d", w.Code)
+	}
+
+	if w := call(t, h, http.MethodGet, "/api/state", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("locked API: expected 401, got %d", w.Code)
+	}
+	for _, hdr := range [][]string{
+		{"Authorization", "Bearer " + token},
+		{"X-Focus-Token", token},
+		{"Cookie", "focus_session=" + token},
+		{"Authorization", "Bearer local-secret"},
+	} {
+		if w := call(t, h, http.MethodGet, "/api/state", nil, hdr...); w.Code != http.StatusOK {
+			t.Errorf("auth via %s: expected 200, got %d", hdr[0], w.Code)
+		}
+	}
+
+	if w := call(t, h, http.MethodPost, "/api/auth/login", map[string]string{"password": "s3cret"}); w.Code != http.StatusOK {
+		t.Errorf("login (trimmed password): expected 200, got %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, "/api/auth/login", map[string]string{"password": "nope"}); w.Code != http.StatusUnauthorized {
+		t.Errorf("wrong password: expected 401, got %d", w.Code)
+	}
+
+	w = call(t, h, http.MethodPost, "/api/auth/change-password",
+		map[string]string{"old_password": "s3cret", "new_password": "n3w"}, "Authorization", "Bearer "+token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("change password: %d %s", w.Code, w.Body.String())
+	}
+	newToken := decode[map[string]any](t, w)["token"].(string)
+	if w := call(t, h, http.MethodGet, "/api/state", nil, "Authorization", "Bearer "+token); w.Code != http.StatusUnauthorized {
+		t.Errorf("old tokens must be revoked after a password change, got %d", w.Code)
+	}
+	if w := call(t, h, http.MethodGet, "/api/state", nil, "Authorization", "Bearer "+newToken); w.Code != http.StatusOK {
+		t.Errorf("new token rejected: %d", w.Code)
+	}
+}
+
+func TestSettingsHidePassword(t *testing.T) {
+	h, database := setupTestServer(t)
+	_ = database.SetPasswordHash("hash")
+	auth := []string{"Authorization", "Bearer local-secret"}
+
+	w := call(t, h, http.MethodGet, "/api/settings", nil, auth...)
+	if strings.Contains(w.Body.String(), "password") {
+		t.Fatalf("settings expose the password hash: %s", w.Body.String())
+	}
+	if w := call(t, h, http.MethodPost, "/api/settings", map[string]string{"password_hash": "x"}, auth...); w.Code != http.StatusBadRequest {
+		t.Fatalf("writing password_hash: expected 400, got %d", w.Code)
+	}
+	w = call(t, h, http.MethodPost, "/api/settings", map[string]string{"work_duration": "42"}, auth...)
+	if w.Code != http.StatusOK || decode[map[string]string](t, w)["work_duration"] != "42" {
+		t.Fatalf("work_duration update failed: %d %s", w.Code, w.Body.String())
+	}
+	if snap := decode[timer.StateSnapshot](t, call(t, h, http.MethodGet, "/api/state", nil, auth...)); snap.WorkDurationMin != 42 {
+		t.Fatalf("timer did not follow the new duration: %d", snap.WorkDurationMin)
+	}
+}
+
+func TestActionsAndMethods(t *testing.T) {
+	h, _ := setupTestServer(t)
+	w := call(t, h, http.MethodPost, "/api/action", map[string]string{"action": "start", "project": "CLI", "mode": "free"})
+	if snap := decode[timer.StateSnapshot](t, w); snap.State != "free-running" || snap.Project != "CLI" {
+		t.Fatalf("unexpected snapshot %+v", snap)
+	}
+	if w := call(t, h, http.MethodPost, "/api/action", map[string]string{"action": "explode"}); w.Code != http.StatusBadRequest {
+		t.Errorf("unknown action: expected 400, got %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, "/api/action", "{not json"); w.Code != http.StatusBadRequest {
+		t.Errorf("malformed JSON: expected 400, got %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, "/api/state", nil); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /api/state: expected 405, got %d", w.Code)
+	}
+	if w := call(t, h, http.MethodGet, "/", nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "<!DOCTYPE html>") {
+		t.Errorf("index not served: %d", w.Code)
+	}
+}
+
+func TestImportExportRoundTrip(t *testing.T) {
+	h, _ := setupTestServer(t)
+	csvData := "Project,Start Time,End Time,Duration (seconds)\nMaths,2026-01-05T09:00:00Z,2026-01-05T10:00:00Z,3600\n"
+	w := call(t, h, http.MethodPost, "/api/import", csvData, "Content-Type", "text/csv")
+	if res := decode[map[string]any](t, w); res["imported"] != float64(1) {
+		t.Fatalf("import: %s", w.Body.String())
+	}
+	for _, format := range []string{"json", "csv", "timew"} {
+		w := call(t, h, http.MethodGet, "/api/export?format="+format, nil)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Maths") {
+			t.Errorf("export %s: %d %s", format, w.Code, w.Body.String())
+		}
+	}
+	if w := call(t, h, http.MethodGet, "/api/month?year=2026&month=1", nil); decode[db.MonthData](t, w).TotalSeconds != 3600 {
+		t.Errorf("month data does not include the import")
+	}
+}
+
+func TestRenameProjectFollowedByTimer(t *testing.T) {
+	h, database := setupTestServer(t)
+	now := time.Now()
+	if _, err := database.RecordSession(db.Session{ProjectName: "Old", EndTime: now, DurationSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	call(t, h, http.MethodPost, "/api/action", map[string]string{"action": "set_project", "project": "Old"})
+
+	w := call(t, h, http.MethodPost, "/api/projects/rename", map[string]string{"old_name": "Old", "new_name": "New"})
+	if w.Code != http.StatusOK || decode[map[string]string](t, w)["name"] != "New" {
+		t.Fatalf("rename: %d %s", w.Code, w.Body.String())
+	}
+	if snap := decode[timer.StateSnapshot](t, call(t, h, http.MethodGet, "/api/state", nil)); snap.Project != "New" {
+		t.Errorf("timer should follow the renamed project, got %q", snap.Project)
+	}
+	if w := call(t, h, http.MethodPost, "/api/projects/rename", map[string]string{"old_name": "New", "new_name": " "}); w.Code != http.StatusBadRequest {
+		t.Errorf("empty name: expected 400, got %d", w.Code)
+	}
+}
+
+func TestVirtualMP3Reader(t *testing.T) {
+	r := NewVirtualMP3Reader([]byte("ab"), 2, []byte("XYZ"), 1)
+	data, err := io.ReadAll(r)
+	if err != nil || string(data) != "ababXYZab" {
+		t.Fatalf("got %q, %v", data, err)
+	}
+	if _, err := r.Seek(3, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 3)
+	if n, _ := r.Read(buf); string(buf[:n]) != "bXY" {
+		t.Fatalf("after seek got %q", buf[:n])
 	}
 }
