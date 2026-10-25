@@ -1,0 +1,9 @@
+.git
+.direnv
+result
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+Dockerfile
+docker-compose.yml

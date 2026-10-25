@@ -1,0 +1,15 @@
+services:
+  focus:
+    build: .
+    image: focus:latest
+    container_name: focus
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      TZ: Europe/Paris
+    volumes:
+      - focus-data:/data
+
+volumes:
+  focus-data:
