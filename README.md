@@ -21,7 +21,7 @@
 
 ### 1. Standalone Linux (Non-NixOS)
 
-Focus can be built and run on any Linux distribution using the standard Go toolchain (Go 1.21+ required).
+Focus can be built and run on any Linux distribution using the standard Go toolchain (Go 1.26+ required).
 
 1. **Clone the repository:**
     
@@ -62,6 +62,21 @@ If you use Nix with flakes enabled, you can run or install Focus directly:
     ```
     
 
+### 3. Docker
+
+```
+docker compose up -d --build
+```
+
+Open `http://127.0.0.1:8765`. Data lives in the `focus-data` volume (`/data/focus.db`).
+Set `TZ` in `docker-compose.yml` to your time zone: days and months are computed in local time.
+The port is only published on `127.0.0.1`; put a reverse proxy with HTTPS in front of it to expose it.
+
+### Network exposure
+
+The daemon listens on `127.0.0.1` by default (`-host` or `$HOST` to change it). Until a password
+is set, the API is open: set one from the web UI before exposing Focus on a network.
+
 ## Waybar Integration
 
 Focus exposes a real-time status output designed for status bars like Waybar.
@@ -89,7 +104,8 @@ Manage your timer directly from the terminal or keybindings:
 |**Command**|**Description**|
 |`focus daemon`|Start the HTTP server and web UI daemon|
 |`focus status`|Output current timer status text|
-|`focus status --watch --json`|Stream real-time JSON state updates|
+|`focus status --watch --json`|Stream real-time JSON state updates (one line per change)|
+|`focus login <url>`|Authenticate the CLI against a remote Focus server|
 |`focus toggle`|Toggle timer state (start / pause / resume)|
 |`focus pause`|Pause active timer session|
 |`focus resume`|Resume paused timer session|

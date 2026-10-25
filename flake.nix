@@ -28,7 +28,7 @@
 
               meta = with pkgs.lib; {
                 description = "Focus Pomodoro & Timer GUI/CLI with Rosé Pine theme";
-                homepage = "https://github.com/ben-hourlier/Focus";
+                homepage = "https://github.com/bhr-tools/Focus";
                 license = licenses.mit;
                 mainProgram = "focus";
               };
@@ -65,7 +65,7 @@
 
             package = lib.mkOption {
               type = lib.types.package;
-              default = self.packages.${pkgs.system}.default;
+              default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
               description = "The Focus package to use.";
             };
 
@@ -156,6 +156,7 @@
                   Group = inst.group;
                   StateDirectory = lib.mkIf (lib.hasPrefix "/var/lib/" (toString inst.dataDir)) stateDir;
                   WorkingDirectory = toString inst.dataDir;
+                  NoNewPrivileges = true;
                 };
               }
             ) cfg.instances;
@@ -166,7 +167,7 @@
       nixosModules.default = nixosModule;
       nixosModules.focus = nixosModule;
       overlays.default = final: prev: {
-        focus = self.packages.${final.system}.default;
+        focus = self.packages.${final.stdenv.hostPlatform.system}.default;
       };
     };
 }

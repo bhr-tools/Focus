@@ -1,3 +1,5 @@
+// Package timer holds the single Pomodoro / stopwatch state machine shared by
+// every client (web UI, CLI, status bar).
 package timer
 
 import (
@@ -12,783 +14,603 @@ import (
 	"time"
 
 	"focus/internal/db"
+	"focus/internal/paths"
+)
+
+// Statuses and phases.
+const (
+	StatusIdle    = "idle"
+	StatusRunning = "running"
+	StatusPaused  = "paused"
+
+	PhaseWork  = "work"
+	PhaseBreak = "break"
+
+	AlertWorkCompleted = "work_completed"
+	AlertBreakEnded    = "break_ended"
+
+	// MaxDurationMin bounds the configurable work and break durations.
+	MaxDurationMin = 24 * 60
+
+	breakColor = "#9ccfd8" // Rosé Pine foam
 )
 
 type StateSnapshot struct {
-	State            string `json:"state"`            // "work-running", "work-paused", "break-running", "break-paused", "free-running", "free-paused", "idle"
-	Status           string `json:"status"`           // "running", "paused", "idle"
-	Mode             string `json:"mode"`             // "pomodoro", "free"
-	Phase            string `json:"phase"`            // "work", "break"
-	Project          string `json:"project"`          // Project name
-	ProjectColor     string `json:"project_color"`    // Real Project Rosé Pine color (not altered during break)
-	Color            string `json:"color"`            // Project Rosé Pine color or break foam color
-	Text             string `json:"text"`             // Formatted text for bars e.g. "Work: 58m"
-	TimeStr          string `json:"time_str"`         // MM:SS or HH:MM:SS
-	ElapsedSeconds   int    `json:"elapsed_seconds"`  // Elapsed in current phase
-	RemainingSeconds int    `json:"remaining_seconds"`// Remaining in countdown
-	TotalSeconds     int    `json:"total_seconds"`    // Phase duration (pomodoro)
-	Percent          int    `json:"percent"`          // 0 - 100
-	Tooltip          string `json:"tooltip"`          // Detailed tooltip for waybar
-	Theme            string `json:"theme"`            // "dark" or "light" (synced from ~/.config/theme_state)
-	LastRecordedAt   int64  `json:"last_recorded_at"` // Unix timestamp in ms of last saved activity
-	AlertID          int64  `json:"alert_id,omitempty"`       // Unix timestamp in ms of session completion alert
-	AlertType        string `json:"alert_type,omitempty"`     // "work_completed" or "break_ended"
-	OriginClientID   string `json:"origin_client_id,omitempty"` // ID of the client that started this session
+	State            string `json:"state"`  // "idle", "work-running", "break-paused", "free-running", ...
+	Status           string `json:"status"` // "idle", "running", "paused"
+	Mode             string `json:"mode"`   // "pomodoro", "free"
+	Phase            string `json:"phase"`  // "work", "break"
+	Project          string `json:"project"`
+	ProjectColor     string `json:"project_color"` // project color, even during a break
+	Color            string `json:"color"`         // project color, or foam during a break
+	Text             string `json:"text"`          // status bar text, e.g. "Work: 58min"
+	TimeStr          string `json:"time_str"`      // MM:SS or HH:MM:SS
+	ElapsedSeconds   int    `json:"elapsed_seconds"`
+	RemainingSeconds int    `json:"remaining_seconds"`
+	TotalSeconds     int    `json:"total_seconds"`
+	Percent          int    `json:"percent"` // 0-100
+	Tooltip          string `json:"tooltip"`
+	WorkDurationMin  int    `json:"work_duration_min"`
+	BreakDurationMin int    `json:"break_duration_min"`
+	Theme            string `json:"theme"`            // "dark", "light" or "" (from ~/.config/theme_state)
+	LastRecordedAt   int64  `json:"last_recorded_at"` // Unix ms of the last saved or edited session
+	AlertID          int64  `json:"alert_id,omitempty"`
+	AlertType        string `json:"alert_type,omitempty"`
+	OriginClientID   string `json:"origin_client_id,omitempty"` // client that started the session
+}
+
+// StateFilePath is where the daemon mirrors its state for the CLI of the same
+// user; "" when no private directory is available (the file is then skipped).
+func StateFilePath() string {
+	path, err := paths.File("state.json")
+	if err != nil {
+		log.Printf("timer: no state file: %v", err)
+		return ""
+	}
+	return path
 }
 
 type Engine struct {
-	mu sync.RWMutex
-	db *db.DB
+	mu        sync.Mutex
+	db        *db.DB
+	statePath string // "" disables the state file
 
-	mode             string // "pomodoro", "free"
-	phase            string // "work", "break"
-	status           string // "idle", "running", "paused"
-	project          string
-	projectColor     string
+	mode         string
+	phase        string
+	status       string
+	project      string
+	projectColor string
+	workMin      int
+	breakMin     int
 
-	workDurationMin  int
-	breakDurationMin int
-	totalSeconds     int
-	elapsedSeconds   int
-	remainingSeconds int
-
-	sessionStartTime time.Time
-	activeWorkStart  time.Time
-	accumulatedWorkSec int
+	accumulated time.Duration // time spent in the current phase before activeSince
+	activeSince time.Time     // zero unless running
 
 	lastRecordedAt int64
-	lastAlertID    int64
+	alertID        int64
 	alertType      string
 	originClientID string
-	lastTheme   string
+	theme          string
+
 	subscribers map[chan StateSnapshot]struct{}
-	stopChan    chan struct{}
+	stop        chan struct{}
+	stopOnce    sync.Once
 }
 
-func NewEngine(database *db.DB) *Engine {
-	// Read defaults from DB settings
-	workDur := 60
-	breakDur := 10
-	if settings, err := database.GetSettings(); err == nil {
-		if w, ok := settings["work_duration"]; ok && w != "" {
-			var val int
-			if _, err := fmt.Sscanf(w, "%d", &val); err == nil && val > 0 {
-				workDur = val
-			}
-		}
-		if b, ok := settings["break_duration"]; ok && b != "" {
-			var val int
-			if _, err := fmt.Sscanf(b, "%d", &val); err == nil && val > 0 {
-				breakDur = val
-			}
-		}
+// NewEngine restores the durations and last project from the database and
+// starts the ticker. statePath may be empty.
+func NewEngine(database *db.DB, statePath string) *Engine {
+	project, err := database.GetLastProject()
+	if err != nil {
+		log.Printf("timer: read last project: %v", err)
+		project = db.DefaultProjectName
 	}
-
-	// Default project: pick the last project tracked
-	defProj, _ := database.GetLastProject()
-	if defProj == "" {
-		defProj = "Work"
-	}
-	defColor := db.RosePinePalette[0]
-	if p, err := database.GetOrCreateProject(defProj); err == nil {
-		defColor = p.Color
+	color := db.RosePinePalette[0]
+	if p, err := database.GetOrCreateProject(project); err == nil {
+		project, color = p.Name, p.Color
 	}
 
 	e := &Engine{
-		db:               database,
-		mode:             "pomodoro",
-		phase:            "work",
-		status:           "idle",
-		project:          defProj,
-		projectColor:     defColor,
-		workDurationMin:  workDur,
-		breakDurationMin: breakDur,
-		totalSeconds:     workDur * 60,
-		elapsedSeconds:   0,
-		remainingSeconds: workDur * 60,
-		lastTheme:        getSystemTheme(),
-		subscribers:      make(map[chan StateSnapshot]struct{}),
-		stopChan:         make(chan struct{}),
+		db:           database,
+		statePath:    statePath,
+		mode:         db.ModePomodoro,
+		phase:        PhaseWork,
+		status:       StatusIdle,
+		project:      project,
+		projectColor: color,
+		workMin:      clampDuration(database.GetIntSetting(db.SettingWorkDuration, 60)),
+		breakMin:     clampDuration(database.GetIntSetting(db.SettingBreakDuration, 10)),
+		theme:        readSystemTheme(),
+		subscribers:  make(map[chan StateSnapshot]struct{}),
+		stop:         make(chan struct{}),
 	}
+	e.mu.Lock()
+	e.publishLocked()
+	e.mu.Unlock()
 
-	// Write initial state to file
-	e.writeStateFile(e.Snapshot())
-
-	// Start ticker loop
 	go e.runLoop()
-
 	return e
 }
 
-func (e *Engine) Close() {
-	close(e.stopChan)
+func clampDuration(minutes int) int {
+	return max(1, min(minutes, MaxDurationMin))
 }
 
+// Close stops the ticker. It is safe to call more than once.
+func (e *Engine) Close() {
+	e.stopOnce.Do(func() { close(e.stop) })
+}
+
+// Subscribe returns a channel receiving every new snapshot, starting with the
+// current one. Slow subscribers only miss intermediate snapshots, never the latest.
 func (e *Engine) Subscribe() chan StateSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	ch := make(chan StateSnapshot, 10)
-	e.subscribers[ch] = struct{}{}
+	ch := make(chan StateSnapshot, 1)
 	ch <- e.snapshotLocked()
+	e.subscribers[ch] = struct{}{}
 	return ch
 }
 
 func (e *Engine) Unsubscribe(ch chan StateSnapshot) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	delete(e.subscribers, ch)
-	close(ch)
+	if _, ok := e.subscribers[ch]; ok {
+		delete(e.subscribers, ch)
+		close(ch)
+	}
 }
 
 func (e *Engine) runLoop() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-
 	for {
 		select {
-		case <-e.stopChan:
+		case <-e.stop:
 			return
 		case <-ticker.C:
-			// Check theme sync continuously, even when timer is idle
-			curTheme := getSystemTheme()
-			e.mu.Lock()
-			themeChanged := false
-			if curTheme != e.lastTheme {
-				e.lastTheme = curTheme
-				themeChanged = true
-			}
-			isRunning := (e.status == "running")
-			e.mu.Unlock()
-
-			if themeChanged {
-				snap := e.Snapshot()
-				e.broadcast(snap)
-				e.writeStateFile(snap)
-			}
-
-			if isRunning {
-				e.tick()
-			}
+			e.tick(readSystemTheme())
 		}
 	}
 }
 
-func (e *Engine) tick() {
-	e.mu.Lock()
-	if e.status != "running" {
-		e.mu.Unlock()
-		return
-	}
-
-	curActive := int(time.Since(e.activeWorkStart).Seconds())
-	if curActive < 0 {
-		curActive = 0
-	}
-	e.elapsedSeconds = e.accumulatedWorkSec + curActive
-	if e.mode == "pomodoro" {
-		e.remainingSeconds = e.totalSeconds - e.elapsedSeconds
-	} else if e.mode == "free" {
-		e.remainingSeconds = 0
-	}
-
-	var sessionCommitted bool
-	if e.mode == "pomodoro" {
-		if e.remainingSeconds <= 0 {
-			// Phase finished!
-			if e.phase == "work" {
-				// Work session over
-				dur := e.totalSeconds
-				workEnd := time.Now()
-				workStart := workEnd.Add(-time.Duration(dur) * time.Second)
-				proj := e.project
-
-				if _, err := e.db.RecordSession(db.Session{
-					ProjectName:     proj,
-					Mode:            "pomodoro",
-					StartTime:       workStart,
-					EndTime:         workEnd,
-					DurationSeconds: dur,
-					Completed:       true,
-				}); err != nil {
-					log.Printf("Error recording session: %v", err)
-				} else {
-					sessionCommitted = true
-				}
-				e.lastRecordedAt = time.Now().UnixMilli()
-				e.lastAlertID = time.Now().UnixMilli()
-				e.alertType = "work_completed"
-				go e.triggerAlarm("Deepwork session over", "Time for a break.")
-
-				// Transition to break (paused, wait for user to start)
-				e.phase = "break"
-				e.totalSeconds = e.breakDurationMin * 60
-				e.elapsedSeconds = 0
-				e.remainingSeconds = e.totalSeconds
-				e.status = "paused"
-				e.sessionStartTime = time.Now()
-				e.activeWorkStart = time.Time{}
-				e.accumulatedWorkSec = 0
-			} else {
-				// Break over
-				e.lastAlertID = time.Now().UnixMilli()
-				e.alertType = "break_ended"
-				go func() {
-					e.triggerAlarm("Break over", "Prepare a new session for deepwork.")
-				}()
-
-				// Transition to work (paused, wait for user to start)
-				e.phase = "work"
-				e.totalSeconds = e.workDurationMin * 60
-				e.elapsedSeconds = 0
-				e.remainingSeconds = e.totalSeconds
-				e.status = "paused"
-				e.sessionStartTime = time.Now()
-				e.activeWorkStart = time.Time{}
-				e.accumulatedWorkSec = 0
-			}
-		}
-	}
-
-	snap := e.snapshotLocked()
-	e.mu.Unlock()
-
-	if sessionCommitted {
-		e.NotifyActivityRecorded()
-	} else {
-		e.broadcast(snap)
-		e.writeStateFile(snap)
-	}
-}
-
-func (e *Engine) Snapshot() StateSnapshot {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	return e.snapshotLocked()
-}
-
-func (e *Engine) snapshotLocked() StateSnapshot {
-	// Determine composite state string
-	var stateStr string
-	if e.status == "idle" {
-		stateStr = "idle"
-	} else {
-		if e.mode == "free" {
-			stateStr = fmt.Sprintf("free-%s", e.status)
-		} else {
-			stateStr = fmt.Sprintf("%s-%s", e.phase, e.status)
-		}
-	}
-
-	// Format text & timeStr
-	var timeStr, text, tooltip string
-	var percent int
-
-	if e.status == "idle" {
-		if e.mode == "pomodoro" {
-			remMin := e.totalSeconds / 60
-			text = fmt.Sprintf("Work: %dmin", remMin)
-			timeStr = fmt.Sprintf("%02d:00", remMin)
-		} else {
-			text = "Stopwatch: 0min"
-			timeStr = "00:00"
-		}
-		tooltip = fmt.Sprintf("Project: %s\nMode: %s (idle)", e.project, e.mode)
-		percent = 0
-	} else if e.mode == "pomodoro" {
-		remSec := e.remainingSeconds
-		if remSec < 0 {
-			remSec = 0
-		}
-		mins := remSec / 60
-		secs := remSec % 60
-		timeStr = fmt.Sprintf("%02d:%02d", mins, secs)
-
-		// Use ceil for countdown text so 0min only shows when 0s remain
-		displayMins := (remSec + 59) / 60
-		if remSec == 0 {
-			displayMins = 0
-		}
-
-		if e.phase == "break" {
-			text = fmt.Sprintf("Break: %dmin", displayMins)
-		} else {
-			text = fmt.Sprintf("Work: %dmin", displayMins)
-		}
-
-		if e.totalSeconds > 0 {
-			percent = int((float64(e.elapsedSeconds) / float64(e.totalSeconds)) * 100)
-			if percent > 100 {
-				percent = 100
-			}
-		}
-
-		tooltip = fmt.Sprintf("Project: %s\nPhase: %s (%s)\nRemaining: %s / %dm",
-			e.project, capitalize(e.phase), e.status, timeStr, e.totalSeconds/60)
-	} else { // free stopwatch timer
-		totalSec := e.elapsedSeconds
-		mins := totalSec / 60
-		secs := totalSec % 60
-		hrs := totalSec / 3600
-
-		if hrs > 0 {
-			timeStr = fmt.Sprintf("%02d:%02d:%02d", hrs, (totalSec%3600)/60, secs)
-		} else {
-			timeStr = fmt.Sprintf("%02d:%02d", mins, secs)
-		}
-		text = fmt.Sprintf("Stopwatch: %dmin", mins)
-		percent = 100
-		tooltip = fmt.Sprintf("Project: %s\nMode: Stopwatch (%s)\nTime: %s",
-			e.project, e.status, timeStr)
-	}
-
-	color := e.projectColor
-	if e.phase == "break" && e.mode == "pomodoro" {
-		color = "#9ccfd8" // Foam accent for break
-	}
-
-	return StateSnapshot{
-		State:            stateStr,
-		Status:           e.status,
-		Mode:             e.mode,
-		Phase:            e.phase,
-		Project:          e.project,
-		ProjectColor:     e.projectColor,
-		Color:            color,
-		Text:             text,
-		TimeStr:          timeStr,
-		ElapsedSeconds:   e.elapsedSeconds,
-		RemainingSeconds: e.remainingSeconds,
-		TotalSeconds:     e.totalSeconds,
-		Percent:          percent,
-		Tooltip:          tooltip,
-		Theme:            getSystemTheme(),
-		LastRecordedAt:   e.lastRecordedAt,
-		AlertID:          e.lastAlertID,
-		AlertType:        e.alertType,
-		OriginClientID:   e.originClientID,
-	}
-}
-
-func (e *Engine) broadcast(snap StateSnapshot) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	for ch := range e.subscribers {
-		select {
-		case ch <- snap:
-		default:
-		}
-	}
-}
-
-func (e *Engine) writeStateFile(snap StateSnapshot) {
-	data, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return
-	}
-
-	statePath := "/tmp/focus_state.json"
-	tmpPath := statePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err == nil {
-		_ = os.Rename(tmpPath, statePath)
-	}
-}
-
-func (e *Engine) triggerAlarm(title, message string) {
-	// 1. Play sound on host hardware ONLY if explicitly enabled in settings AND started from CLI/host
-	settings, _ := e.db.GetSettings()
-	alarmEnabled := settings != nil && (settings["alarm_enabled"] == "true" || settings["server_sound"] == "true")
-	if alarmEnabled && (e.originClientID == "cli" || e.originClientID == "") {
-		home, _ := os.UserHomeDir()
-		alarmPath := filepath.Join(home, ".config", "deepwork-alarm.mp3")
-		go func() {
-			if _, err := os.Stat(alarmPath); err == nil {
-				_ = exec.Command("pw-play", alarmPath).Run()
-			} else {
-				// Fallback system beep or paplay
-				_ = exec.Command("canberra-gtk-play", "-i", "complete").Run()
-			}
-		}()
-	}
-
-	// 2. Desktop notification
-	go func() {
-		_ = exec.Command("notify-send", "--category=system_alert", title, message).Run()
-	}()
-}
-
-// Public commands
-
-func (e *Engine) Start(project, mode, originClientID string) StateSnapshot {
+// tick advances a running timer and publishes theme changes.
+func (e *Engine) tick(theme string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if project != "" {
-		e.project = project
-		if p, err := e.db.GetOrCreateProject(project); err == nil {
-			e.projectColor = p.Color
+	changed := theme != e.theme
+	e.theme = theme
+	if e.status == StatusRunning {
+		if e.mode == db.ModePomodoro && e.elapsedLocked() >= e.phaseTotalLocked() {
+			e.completePhaseLocked()
 		}
+		changed = true
 	}
+	if changed {
+		e.publishLocked()
+	}
+}
 
-	if mode == "free" || mode == "pomodoro" {
+// completePhaseLocked handles a countdown reaching zero: a finished work phase
+// is recorded, then the next phase waits, paused, for the user.
+func (e *Engine) completePhaseLocked() {
+	total := e.phaseTotalLocked()
+	// End of the phase, even if the tick comes late (e.g. after a suspend).
+	end := time.Now().Add(total - e.elapsedLocked())
+	if e.phase == PhaseWork {
+		e.recordLocked(total, end)
+		e.alertType = AlertWorkCompleted
+		e.enterPhaseLocked(PhaseBreak)
+	} else {
+		e.alertType = AlertBreakEnded
+		e.enterPhaseLocked(PhaseWork)
+	}
+	e.alertID = time.Now().UnixMilli()
+	go e.triggerAlarm(e.alertType, e.originClientID)
+}
+
+func (e *Engine) elapsedLocked() time.Duration {
+	if e.status == StatusRunning {
+		return e.accumulated + time.Since(e.activeSince)
+	}
+	return e.accumulated
+}
+
+func (e *Engine) phaseTotalLocked() time.Duration {
+	switch {
+	case e.mode != db.ModePomodoro:
+		return 0
+	case e.phase == PhaseBreak:
+		return time.Duration(e.breakMin) * time.Minute
+	default:
+		return time.Duration(e.workMin) * time.Minute
+	}
+}
+
+// recordLocked saves a work session of the given length ending at end.
+// A forgotten stopwatch keeps its last db.MaxSessionDuration.
+func (e *Engine) recordLocked(length time.Duration, end time.Time) {
+	secs := int(min(length, db.MaxSessionDuration).Round(time.Second) / time.Second)
+	if secs <= 0 {
+		return
+	}
+	_, err := e.db.RecordSession(db.Session{
+		ProjectName:     e.project,
+		Mode:            e.mode,
+		EndTime:         end,
+		DurationSeconds: secs,
+		Completed:       true,
+	})
+	if err != nil {
+		log.Printf("timer: record session: %v", err)
+		return
+	}
+	e.lastRecordedAt = time.Now().UnixMilli()
+}
+
+// enterPhaseLocked switches to a fresh, paused phase.
+func (e *Engine) enterPhaseLocked(phase string) {
+	e.phase = phase
+	e.status = StatusPaused
+	e.accumulated = 0
+	e.activeSince = time.Time{}
+}
+
+// resetLocked returns to the idle state, keeping mode, project and durations.
+func (e *Engine) resetLocked() {
+	e.phase = PhaseWork
+	e.status = StatusIdle
+	e.accumulated = 0
+	e.activeSince = time.Time{}
+	e.originClientID = ""
+	e.clearAlertLocked()
+}
+
+func (e *Engine) clearAlertLocked() {
+	e.alertID = 0
+	e.alertType = ""
+}
+
+func (e *Engine) setProjectLocked(name string) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	p, err := e.db.GetOrCreateProject(name)
+	if err != nil {
+		log.Printf("timer: set project: %v", err)
+		return
+	}
+	e.project, e.projectColor = p.Name, p.Color
+}
+
+func (e *Engine) setModeLocked(mode string) {
+	if mode == db.ModePomodoro || mode == db.ModeFree {
 		e.mode = mode
 	}
+}
 
-	e.originClientID = originClientID
-	e.status = "running"
-	e.lastAlertID = 0
-	e.alertType = ""
-	e.elapsedSeconds = 0
-	e.accumulatedWorkSec = 0
-	e.sessionStartTime = time.Now()
-	e.activeWorkStart = time.Now()
+func (e *Engine) startLocked(project, mode, origin string) {
+	e.setProjectLocked(project)
+	e.setModeLocked(mode)
+	e.resetLocked()
+	e.status = StatusRunning
+	e.activeSince = time.Now()
+	e.originClientID = origin
+}
 
-	if e.mode == "pomodoro" {
-		e.phase = "work"
-		e.totalSeconds = e.workDurationMin * 60
-		e.remainingSeconds = e.totalSeconds
-	} else {
-		e.phase = "work"
-		e.totalSeconds = 0
-		e.remainingSeconds = 0
+func (e *Engine) pauseLocked() {
+	if e.status != StatusRunning {
+		return
 	}
+	e.accumulated += time.Since(e.activeSince)
+	e.activeSince = time.Time{}
+	e.status = StatusPaused
+}
 
-	snap := e.snapshotLocked()
-	go e.broadcast(snap)
-	go e.writeStateFile(snap)
-	return snap
+func (e *Engine) resumeLocked(origin string) {
+	switch e.status {
+	case StatusIdle:
+		e.startLocked("", "", origin)
+	case StatusPaused:
+		e.status = StatusRunning
+		e.activeSince = time.Now()
+		if origin != "" {
+			e.originClientID = origin
+		}
+		e.clearAlertLocked()
+	}
+}
+
+// ==================== Public commands ====================
+
+// Start begins a new work phase (or stopwatch), discarding any current one.
+func (e *Engine) Start(project, mode, origin string) StateSnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.startLocked(project, mode, origin)
+	return e.publishLocked()
 }
 
 func (e *Engine) Pause() StateSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	if e.status == "running" {
-		e.status = "paused"
-		if !e.activeWorkStart.IsZero() {
-			e.accumulatedWorkSec += int(time.Since(e.activeWorkStart).Seconds())
-			e.activeWorkStart = time.Time{}
-		}
-		e.elapsedSeconds = e.accumulatedWorkSec
-	}
-
-	snap := e.snapshotLocked()
-	go e.broadcast(snap)
-	go e.writeStateFile(snap)
-	return snap
+	e.pauseLocked()
+	return e.publishLocked()
 }
 
-func (e *Engine) Resume(originClientID string) StateSnapshot {
+func (e *Engine) Resume(origin string) StateSnapshot {
 	e.mu.Lock()
-	if e.status == "idle" {
-		e.mu.Unlock()
-		return e.Start(e.project, e.mode, originClientID)
-	}
-
-	if e.status == "paused" {
-		e.status = "running"
-		if originClientID != "" {
-			e.originClientID = originClientID
-		}
-		e.lastAlertID = 0
-		e.alertType = ""
-		e.activeWorkStart = time.Now()
-	}
-
-	snap := e.snapshotLocked()
-	e.mu.Unlock()
-
-	go e.broadcast(snap)
-	go e.writeStateFile(snap)
-	return snap
+	defer e.mu.Unlock()
+	e.resumeLocked(origin)
+	return e.publishLocked()
 }
 
-func (e *Engine) Toggle(originClientID string) StateSnapshot {
-	e.mu.RLock()
-	st := e.status
-	e.mu.RUnlock()
-
-	if st == "running" {
-		return e.Pause()
-	} else if st == "paused" {
-		return e.Resume(originClientID)
+// Toggle starts, pauses or resumes depending on the current status.
+func (e *Engine) Toggle(origin string) StateSnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.status == StatusRunning {
+		e.pauseLocked()
 	} else {
-		return e.Start(e.project, e.mode, originClientID)
+		e.resumeLocked(origin)
 	}
+	return e.publishLocked()
 }
 
+// Stop records the current work (stopwatch or Pomodoro work phase) and goes idle.
 func (e *Engine) Stop() StateSnapshot {
 	e.mu.Lock()
-
-	if e.status == "running" && !e.activeWorkStart.IsZero() {
-		e.accumulatedWorkSec += int(time.Since(e.activeWorkStart).Seconds())
-		e.activeWorkStart = time.Time{}
+	defer e.mu.Unlock()
+	if e.status != StatusIdle && (e.mode == db.ModeFree || e.phase == PhaseWork) {
+		e.recordLocked(e.elapsedLocked(), time.Now())
 	}
-	e.elapsedSeconds = e.accumulatedWorkSec
-
-	var sessionCommitted bool
-	if (e.mode == "free" || (e.mode == "pomodoro" && e.phase == "work")) && e.elapsedSeconds > 0 {
-		dur := e.elapsedSeconds
-		workEnd := time.Now()
-		workStart := workEnd.Add(-time.Duration(dur) * time.Second)
-		proj := e.project
-		mod := e.mode
-
-		if _, err := e.db.RecordSession(db.Session{
-			ProjectName:     proj,
-			Mode:            mod,
-			StartTime:       workStart,
-			EndTime:         workEnd,
-			DurationSeconds: dur,
-			Completed:       true,
-		}); err != nil {
-			log.Printf("Error recording session: %v", err)
-		} else {
-			sessionCommitted = true
-		}
-		e.lastRecordedAt = time.Now().UnixMilli()
-	}
-
-	e.status = "idle"
-	e.lastAlertID = 0
-	e.alertType = ""
-	e.originClientID = ""
-	e.elapsedSeconds = 0
-	e.accumulatedWorkSec = 0
-	e.activeWorkStart = time.Time{}
-	if e.mode == "pomodoro" {
-		e.phase = "work"
-		e.totalSeconds = e.workDurationMin * 60
-		e.remainingSeconds = e.totalSeconds
-	} else {
-		e.remainingSeconds = 0
-		e.totalSeconds = 0
-	}
-
-	snap := e.snapshotLocked()
-	e.mu.Unlock()
-
-	if sessionCommitted {
-		e.NotifyActivityRecorded()
-	} else {
-		go e.broadcast(snap)
-		go e.writeStateFile(snap)
-	}
-	return snap
+	e.resetLocked()
+	return e.publishLocked()
 }
 
+// Next records the current work phase and switches phase, paused. In
+// stopwatch mode it is equivalent to Stop.
 func (e *Engine) Next() StateSnapshot {
 	e.mu.Lock()
-	if e.mode != "pomodoro" {
+	if e.mode != db.ModePomodoro {
 		e.mu.Unlock()
 		return e.Stop()
 	}
-
-	if e.status == "running" && !e.activeWorkStart.IsZero() {
-		e.accumulatedWorkSec += int(time.Since(e.activeWorkStart).Seconds())
-		e.activeWorkStart = time.Time{}
-	}
-	e.elapsedSeconds = e.accumulatedWorkSec
-
-	var sessionCommitted bool
-	if e.phase == "work" {
-		// Save current work session if any time elapsed
-		if e.elapsedSeconds > 0 {
-			dur := e.elapsedSeconds
-			workEnd := time.Now()
-			workStart := workEnd.Add(-time.Duration(dur) * time.Second)
-			proj := e.project
-			if _, err := e.db.RecordSession(db.Session{
-				ProjectName:     proj,
-				Mode:            "pomodoro",
-				StartTime:       workStart,
-				EndTime:         workEnd,
-				DurationSeconds: dur,
-				Completed:       true,
-			}); err != nil {
-				log.Printf("Error recording session: %v", err)
-			} else {
-				sessionCommitted = true
-			}
-			e.lastRecordedAt = time.Now().UnixMilli()
-		}
-		e.phase = "break"
-		e.totalSeconds = e.breakDurationMin * 60
-		e.elapsedSeconds = 0
-		e.remainingSeconds = e.totalSeconds
-		e.status = "paused" // Do not auto-start
-		e.lastAlertID = 0
-		e.alertType = ""
-		e.sessionStartTime = time.Now()
-		e.accumulatedWorkSec = 0
-		e.activeWorkStart = time.Time{}
+	defer e.mu.Unlock()
+	if e.phase == PhaseWork {
+		e.recordLocked(e.elapsedLocked(), time.Now())
+		e.enterPhaseLocked(PhaseBreak)
 	} else {
-		// From break to work
-		e.phase = "work"
-		e.totalSeconds = e.workDurationMin * 60
-		e.elapsedSeconds = 0
-		e.remainingSeconds = e.totalSeconds
-		e.status = "paused" // Do not auto-start
-		e.lastAlertID = 0
-		e.alertType = ""
-		e.sessionStartTime = time.Now()
-		e.accumulatedWorkSec = 0
-		e.activeWorkStart = time.Time{}
+		e.enterPhaseLocked(PhaseWork)
 	}
-
-	snap := e.snapshotLocked()
-	e.mu.Unlock()
-
-	if sessionCommitted {
-		e.NotifyActivityRecorded()
-	} else {
-		go e.broadcast(snap)
-		go e.writeStateFile(snap)
-	}
-	return snap
+	e.clearAlertLocked()
+	return e.publishLocked()
 }
 
+// Cancel goes idle without recording anything.
 func (e *Engine) Cancel() StateSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	e.status = "idle"
-	e.lastAlertID = 0
-	e.alertType = ""
-	e.originClientID = ""
-	e.elapsedSeconds = 0
-	e.accumulatedWorkSec = 0
-	e.activeWorkStart = time.Time{}
-	if e.mode == "pomodoro" {
-		e.phase = "work"
-		e.totalSeconds = e.workDurationMin * 60
-		e.remainingSeconds = e.totalSeconds
-	} else {
-		e.totalSeconds = 0
-		e.remainingSeconds = 0
-	}
-
-	snap := e.snapshotLocked()
-	go e.broadcast(snap)
-	go e.writeStateFile(snap)
-	return snap
+	e.resetLocked()
+	return e.publishLocked()
 }
 
+// SetMode changes mode and project; ignored while a session is active.
 func (e *Engine) SetMode(mode, project string) StateSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	// If timer is active (running or paused), prevent changing mode
-	if e.status != "idle" {
-		return e.snapshotLocked()
+	if e.status == StatusIdle {
+		e.setProjectLocked(project)
+		e.setModeLocked(mode)
+		e.resetLocked()
 	}
-
-	if project != "" {
-		e.project = project
-		if p, err := e.db.GetOrCreateProject(project); err == nil {
-			e.projectColor = p.Color
-		}
-	}
-
-	if mode == "free" || mode == "pomodoro" {
-		e.mode = mode
-	}
-
-	e.status = "idle"
-	e.originClientID = ""
-	e.elapsedSeconds = 0
-	if e.mode == "pomodoro" {
-		e.phase = "work"
-		e.totalSeconds = e.workDurationMin * 60
-		e.remainingSeconds = e.totalSeconds
-	} else {
-		e.phase = "work"
-		e.totalSeconds = 0
-		e.remainingSeconds = 0
-	}
-
-	snap := e.snapshotLocked()
-	go e.broadcast(snap)
-	go e.writeStateFile(snap)
-	return snap
+	return e.publishLocked()
 }
 
+// SetDurations persists the Pomodoro durations (minutes); non-positive values
+// are ignored. They apply immediately unless the current phase has started.
 func (e *Engine) SetDurations(workMin, breakMin int) StateSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
 	if workMin > 0 {
-		e.workDurationMin = workMin
-		_ = e.db.SetSetting("work_duration", fmt.Sprintf("%d", workMin))
-	}
-	if breakMin > 0 {
-		e.breakDurationMin = breakMin
-		_ = e.db.SetSetting("break_duration", fmt.Sprintf("%d", breakMin))
-	}
-
-	if (e.status == "idle" || (e.status == "paused" && e.elapsedSeconds == 0)) && e.mode == "pomodoro" {
-		if e.phase == "work" {
-			e.totalSeconds = e.workDurationMin * 60
-			e.remainingSeconds = e.totalSeconds
-		} else {
-			e.totalSeconds = e.breakDurationMin * 60
-			e.remainingSeconds = e.totalSeconds
+		e.workMin = clampDuration(workMin)
+		if err := e.db.SetSetting(db.SettingWorkDuration, fmt.Sprint(e.workMin)); err != nil {
+			log.Printf("timer: save work duration: %v", err)
 		}
 	}
-
-	snap := e.snapshotLocked()
-	go e.broadcast(snap)
-	go e.writeStateFile(snap)
-	return snap
+	if breakMin > 0 {
+		e.breakMin = clampDuration(breakMin)
+		if err := e.db.SetSetting(db.SettingBreakDuration, fmt.Sprint(e.breakMin)); err != nil {
+			log.Printf("timer: save break duration: %v", err)
+		}
+	}
+	return e.publishLocked()
 }
 
 func (e *Engine) SetProject(name string) StateSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.setProjectLocked(name)
+	return e.publishLocked()
+}
 
-	if name != "" {
-		e.project = name
-		if p, err := e.db.GetOrCreateProject(name); err == nil {
-			e.projectColor = p.Color
-		}
+// ProjectRenamed makes the timer follow a renamed project, so that the
+// current or next session is not recorded under the old name.
+func (e *Engine) ProjectRenamed(oldName, newName string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if strings.EqualFold(e.project, strings.TrimSpace(oldName)) {
+		e.setProjectLocked(newName)
+		e.publishLocked()
 	}
+}
 
+// Snapshot returns the current state.
+func (e *Engine) Snapshot() StateSnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.snapshotLocked()
+}
+
+// NotifyActivityRecorded tells clients that sessions changed (edit, import...).
+func (e *Engine) NotifyActivityRecorded() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lastRecordedAt = time.Now().UnixMilli()
+	e.publishLocked()
+}
+
+// ==================== Snapshot & publication ====================
+
+// publishLocked sends the current snapshot to every subscriber and to the
+// state file. Holding the lock guarantees snapshots are delivered in order.
+func (e *Engine) publishLocked() StateSnapshot {
 	snap := e.snapshotLocked()
-	go e.broadcast(snap)
-	go e.writeStateFile(snap)
+	for ch := range e.subscribers {
+		select {
+		case <-ch: // drop the stale, unread snapshot
+		default:
+		}
+		ch <- snap
+	}
+	e.writeStateFile(snap)
 	return snap
 }
 
-func capitalize(s string) string {
-	if len(s) == 0 {
-		return ""
+func (e *Engine) snapshotLocked() StateSnapshot {
+	elapsed := int(e.elapsedLocked() / time.Second)
+	total := int(e.phaseTotalLocked() / time.Second)
+	if e.mode == db.ModePomodoro {
+		elapsed = min(elapsed, total)
 	}
-	r := []rune(s)
-	if r[0] >= 'a' && r[0] <= 'z' {
-		r[0] = r[0] - ('a' - 'A')
+
+	snap := StateSnapshot{
+		Status:           e.status,
+		Mode:             e.mode,
+		Phase:            e.phase,
+		Project:          e.project,
+		ProjectColor:     e.projectColor,
+		Color:            e.projectColor,
+		ElapsedSeconds:   elapsed,
+		TotalSeconds:     total,
+		WorkDurationMin:  e.workMin,
+		BreakDurationMin: e.breakMin,
+		Theme:            e.theme,
+		LastRecordedAt:   e.lastRecordedAt,
+		AlertID:          e.alertID,
+		AlertType:        e.alertType,
+		OriginClientID:   e.originClientID,
 	}
-	return string(r)
+
+	switch {
+	case e.status == StatusIdle:
+		snap.State = StatusIdle
+	case e.mode == db.ModeFree:
+		snap.State = "free-" + e.status
+	default:
+		snap.State = e.phase + "-" + e.status
+	}
+
+	if e.mode == db.ModeFree {
+		snap.TimeStr = formatClock(elapsed)
+		snap.Text = fmt.Sprintf("Stopwatch: %dmin", elapsed/60)
+		snap.Percent = 100
+		snap.Tooltip = fmt.Sprintf("Project: %s\nMode: Stopwatch (%s)\nTime: %s", e.project, e.status, snap.TimeStr)
+		if e.status == StatusIdle {
+			snap.Percent = 0
+		}
+		return snap
+	}
+
+	remaining := total - elapsed
+	snap.RemainingSeconds = remaining
+	snap.TimeStr = fmt.Sprintf("%02d:%02d", remaining/60, remaining%60) // countdowns stay MM:SS
+	if total > 0 {
+		snap.Percent = elapsed * 100 / total
+	}
+	label := "Work"
+	if e.phase == PhaseBreak {
+		label = "Break"
+		snap.Color = breakColor
+	}
+	snap.Text = fmt.Sprintf("%s: %dmin", label, (remaining+59)/60) // rounded up: 0min only at 0s
+	snap.Tooltip = fmt.Sprintf("Project: %s\nPhase: %s (%s)\nRemaining: %s / %dm", e.project, label, e.status, snap.TimeStr, total/60)
+	return snap
 }
 
-func getSystemTheme() string {
+// formatClock renders seconds as MM:SS, or HH:MM:SS from one hour.
+func formatClock(secs int) string {
+	secs = max(secs, 0)
+	if secs >= 3600 {
+		return fmt.Sprintf("%02d:%02d:%02d", secs/3600, secs%3600/60, secs%60)
+	}
+	return fmt.Sprintf("%02d:%02d", secs/60, secs%60)
+}
+
+// writeStateFile atomically replaces the state file.
+func (e *Engine) writeStateFile(snap StateSnapshot) {
+	if e.statePath == "" {
+		return
+	}
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	// Best effort: the CLI falls back to the HTTP API (and this runs every second).
+	_ = paths.WriteFileAtomic(e.statePath, data)
+}
+
+// ==================== Host integration ====================
+
+// readSystemTheme reads ~/.config/theme_state ("dark" or "light"); "" if unset.
+func readSystemTheme() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "dark"
+		return ""
 	}
 	content, err := os.ReadFile(filepath.Join(home, ".config", "theme_state"))
-	if err == nil {
-		val := strings.TrimSpace(string(content))
-		if val == "light" || val == "dark" {
-			return val
-		}
+	if err != nil {
+		return ""
 	}
-	return "dark"
+	if v := strings.TrimSpace(string(content)); v == "light" || v == "dark" {
+		return v
+	}
+	return ""
 }
 
-func (e *Engine) NotifyActivityRecorded() {
-	e.mu.Lock()
-	e.lastRecordedAt = time.Now().UnixMilli()
-	snap := e.snapshotLocked()
-	e.mu.Unlock()
-	e.broadcast(snap)
-	e.writeStateFile(snap)
+// AlertMessage returns the notification title and body of an alert type.
+func AlertMessage(alertType string) (string, string) {
+	if alertType == AlertBreakEnded {
+		return "Break over", "Prepare a new session for deepwork."
+	}
+	return "Deepwork session over", "Time for a break."
+}
+
+// triggerAlarm sends a desktop notification and, for sessions started from
+// the host (CLI or unknown origin), plays the configured alarm sound.
+func (e *Engine) triggerAlarm(alertType, origin string) {
+	title, body := AlertMessage(alertType)
+	runIfAvailable("notify-send", "--category=system_alert", title, body)
+
+	settings, err := e.db.GetSettings()
+	if err != nil || settings[db.SettingAlarmEnabled] != "true" || (origin != "cli" && origin != "") {
+		return
+	}
+	if sound := settings[db.SettingAlarmSound]; sound != "" {
+		if _, err := os.Stat(sound); err == nil {
+			runIfAvailable("pw-play", sound)
+			return
+		}
+	}
+	runIfAvailable("canberra-gtk-play", "-i", "complete")
+}
+
+func runIfAvailable(name string, args ...string) {
+	if _, err := exec.LookPath(name); err != nil {
+		return
+	}
+	if err := exec.Command(name, args...).Run(); err != nil {
+		log.Printf("timer: %s: %v", name, err)
+	}
 }
