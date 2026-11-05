@@ -75,7 +75,7 @@ func TestAPISessionsCRUD(t *testing.T) {
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
 	created := decode[db.Session](t, w)
-	if created.ID == 0 || created.ProjectName != "Frontend Engineering" || created.DurationSeconds != 2700 {
+	if created.ID == 0 || created.ProjectName != "frontend engineering" || created.DurationSeconds != 2700 {
 		t.Fatalf("unexpected created session: %+v", created)
 	}
 
@@ -87,7 +87,7 @@ func TestAPISessionsCRUD(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("update: %d %s", w.Code, w.Body.String())
 	}
-	if s := decode[db.Session](t, w); s.DurationSeconds != 3000 || s.ProjectName != "Frontend Engineering Refactored" {
+	if s := decode[db.Session](t, w); s.DurationSeconds != 3000 || s.ProjectName != "frontend engineering refactored" {
 		t.Fatalf("unexpected updated session: %+v", s)
 	}
 
@@ -240,7 +240,7 @@ func TestSettingsHidePassword(t *testing.T) {
 func TestActionsAndMethods(t *testing.T) {
 	h, _ := setupTestServer(t)
 	w := call(t, h, http.MethodPost, "/api/action", map[string]string{"action": "start", "project": "CLI", "mode": "free"})
-	if snap := decode[timer.StateSnapshot](t, w); snap.State != "free-running" || snap.Project != "CLI" {
+	if snap := decode[timer.StateSnapshot](t, w); snap.State != "free-running" || snap.Project != "cli" {
 		t.Fatalf("unexpected snapshot %+v", snap)
 	}
 	if w := call(t, h, http.MethodPost, "/api/action", map[string]string{"action": "explode"}); w.Code != http.StatusBadRequest {
@@ -266,7 +266,7 @@ func TestImportExportRoundTrip(t *testing.T) {
 	}
 	for _, format := range []string{"json", "csv", "timew"} {
 		w := call(t, h, http.MethodGet, "/api/export?format="+format, nil)
-		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Maths") {
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "maths") {
 			t.Errorf("export %s: %d %s", format, w.Code, w.Body.String())
 		}
 	}
@@ -284,10 +284,10 @@ func TestRenameProjectFollowedByTimer(t *testing.T) {
 	call(t, h, http.MethodPost, "/api/action", map[string]string{"action": "set_project", "project": "Old"})
 
 	w := call(t, h, http.MethodPost, "/api/projects/rename", map[string]string{"old_name": "Old", "new_name": "New"})
-	if w.Code != http.StatusOK || decode[map[string]string](t, w)["name"] != "New" {
+	if w.Code != http.StatusOK || decode[map[string]string](t, w)["name"] != "new" {
 		t.Fatalf("rename: %d %s", w.Code, w.Body.String())
 	}
-	if snap := decode[timer.StateSnapshot](t, call(t, h, http.MethodGet, "/api/state", nil)); snap.Project != "New" {
+	if snap := decode[timer.StateSnapshot](t, call(t, h, http.MethodGet, "/api/state", nil)); snap.Project != "new" {
 		t.Errorf("timer should follow the renamed project, got %q", snap.Project)
 	}
 	if w := call(t, h, http.MethodPost, "/api/projects/rename", map[string]string{"old_name": "New", "new_name": " "}); w.Code != http.StatusBadRequest {

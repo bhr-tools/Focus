@@ -398,10 +398,20 @@ function projectColor(name) {
   return found ? found.color : null;
 }
 
-// canonicalProjectName returns the stored spelling of an existing project.
+// canonicalProjectName returns the stored spelling: project names are lowercase.
 function canonicalProjectName(name) {
-  const found = findProject(name);
-  return found ? found.name : name.trim();
+  return name.trim().toLowerCase();
+}
+
+// Project fields are lowercased as the user types, keeping the caret in place.
+function lowercaseWhileTyping(input) {
+  input.addEventListener('input', () => {
+    const lower = input.value.toLowerCase();
+    if (lower === input.value) return;
+    const { selectionStart, selectionEnd } = input;
+    input.value = lower;
+    input.setSelectionRange(selectionStart, selectionEnd);
+  });
 }
 
 async function loadProjects() {
@@ -500,6 +510,7 @@ function closeProjectMenu() {
 
 function initProjectPicker() {
   const input = $('project-input');
+  ['project-input', 'session-project', 'rename-input'].forEach((id) => lowercaseWhileTyping($(id)));
   $('btn-project-dropdown').addEventListener('click', (e) => {
     e.stopPropagation();
     if ($('project-menu').hidden) openProjectMenu('');
@@ -808,7 +819,7 @@ async function saveEditedSession(e) {
     return;
   }
   const body = {
-    project_name: $('session-project').value.trim(),
+    project_name: canonicalProjectName($('session-project').value),
     start_time: start.toISOString(),
     end_time: end.toISOString(),
   };
@@ -858,10 +869,7 @@ function openRenameDialog(name, year, month) {
 async function renameProject(e) {
   e.preventDefault();
   const { name, year, month, monthOnly } = state.renaming || {};
-  const typed = $('rename-input').value.trim();
-  // Merging reuses the other project's spelling; a change of case is kept as typed.
-  const other = findProject(typed);
-  const newName = other && other.name.toLowerCase() !== (name || '').toLowerCase() ? other.name : typed;
+  const newName = canonicalProjectName($('rename-input').value);
   if (!name || !newName || newName === name) {
     closeDialog('rename-dialog');
     return;

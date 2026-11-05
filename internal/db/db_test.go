@@ -52,7 +52,7 @@ func TestSessionCRUD(t *testing.T) {
 	}
 
 	all, err := database.GetAllSessions()
-	if err != nil || len(all) != 1 || all[0].ProjectName != "DeepWork" || !all[0].Completed {
+	if err != nil || len(all) != 1 || all[0].ProjectName != "deepwork" || !all[0].Completed {
 		t.Fatalf("unexpected sessions %+v (err %v)", all, err)
 	}
 
@@ -60,7 +60,7 @@ func TestSessionCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateSession failed: %v", err)
 	}
-	if updated.ProjectName != "DeepWork Refined" || updated.DurationSeconds != 1800 || updated.UUID != sess.UUID {
+	if updated.ProjectName != "deepwork refined" || updated.DurationSeconds != 1800 || updated.UUID != sess.UUID {
 		t.Errorf("unexpected updated session: %+v", updated)
 	}
 
@@ -96,7 +96,7 @@ func TestRecordSessionUpsertsOnUUID(t *testing.T) {
 		t.Errorf("expected the same row, got ids %d and %d", first.ID, second.ID)
 	}
 	all, _ := database.GetAllSessions()
-	if len(all) != 1 || all[0].ProjectName != "B" || all[0].DurationSeconds != 120 {
+	if len(all) != 1 || all[0].ProjectName != "b" || all[0].DurationSeconds != 120 {
 		t.Fatalf("unexpected sessions after upsert: %+v", all)
 	}
 }
@@ -191,7 +191,7 @@ func TestProjectsAreCaseInsensitiveWithStableColors(t *testing.T) {
 	a, _ := database.GetOrCreateProject("Maths")
 	b, _ := database.GetOrCreateProject("  maths ")
 	c, _ := database.GetOrCreateProject("Physics")
-	if a.ID != b.ID || b.Name != "Maths" {
+	if a.ID != b.ID || a.Name != "maths" || b.Name != "maths" {
 		t.Errorf("expected the same project, got %+v and %+v", a, b)
 	}
 	if a.Color == c.Color || c.ColorIndex != a.ColorIndex+1 {
@@ -210,27 +210,61 @@ func TestRenameProjectMergesEverywhere(t *testing.T) {
 	mustRecord(t, database, "Math", feb, time.Hour)
 	mustRecord(t, database, "Maths", feb.Add(2*time.Hour), time.Hour)
 
-	name, err := database.RenameProject("math", "maths")
-	if err != nil || name != "Maths" {
+	name, err := database.RenameProject("Math", "MATHS")
+	if err != nil || name != "maths" {
 		t.Fatalf("merge into existing project: got %q, %v", name, err)
 	}
 	stats, _ := database.GetStats("all", 0, 0)
-	if len(stats.Projects) != 1 || stats.Projects[0].ProjectName != "Maths" || stats.Projects[0].TotalSeconds != 3*3600 {
+	if len(stats.Projects) != 1 || stats.Projects[0].ProjectName != "maths" || stats.Projects[0].TotalSeconds != 3*3600 {
 		t.Fatalf("expected a single merged project, got %+v", stats.Projects)
 	}
 	projects, _ := database.ListProjects()
 	for _, p := range projects {
-		if p.Name == "Math" {
+		if p.Name == "math" {
 			t.Fatal("the merged project must be deleted")
 		}
 	}
 
-	// A change of case renames the project itself.
-	if name, err := database.RenameProject("Maths", "MATHS"); err != nil || name != "MATHS" {
+	// A change of case only is a no-op: names are always lowercase.
+	if name, err := database.RenameProject("maths", "Maths"); err != nil || name != "maths" {
 		t.Fatalf("case rename: got %q, %v", name, err)
 	}
-	if all, _ := database.GetAllSessions(); all[0].ProjectName != "MATHS" || all[2].ProjectName != "MATHS" {
-		t.Fatalf("sessions not renamed: %+v", all)
+}
+
+func TestLegacyProjectNamesAreLowercased(t *testing.T) {
+	database := setupTestDB(t)
+	mustRecord(t, database, "physique", time.Date(2026, 1, 10, 9, 0, 0, 0, time.Local), time.Hour)
+	legacy := []string{
+		`INSERT INTO projects (name, color, color_index, created_at) VALUES ('Maths', '#000', 5, '2026-01-01T00:00:00Z')`,
+		`INSERT INTO projects (name, color, color_index, created_at) VALUES ('Été', '#111', 6, '2026-01-01T00:00:00Z')`,
+		`INSERT INTO projects (name, color, color_index, created_at) VALUES ('été', '#222', 7, '2026-01-01T00:00:00Z')`,
+		`UPDATE sessions SET project_name = 'PHYSIQUE'`,
+		`INSERT INTO sessions (uuid, project_name, mode, start_time, end_time, duration_seconds)
+			VALUES ('a', 'Maths', 'pomodoro', '2026-01-11T09:00:00Z', '2026-01-11T10:00:00Z', 3600),
+			       ('b', 'Été', 'pomodoro', '2026-01-12T09:00:00Z', '2026-01-12T10:00:00Z', 3600)`,
+	}
+	for _, q := range legacy {
+		if _, err := database.conn.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.lowercaseProjects(); err != nil {
+		t.Fatal(err)
+	}
+
+	projects, _ := database.ListProjects()
+	var names []string
+	for _, p := range projects {
+		names = append(names, p.Name)
+	}
+	if strings.Join(names, ",") != "maths,physique,été" {
+		t.Fatalf("expected lowercase projects with été merged, got %v", names)
+	}
+	sessions, _ := database.GetAllSessions()
+	for _, s := range sessions {
+		if s.ProjectName != strings.ToLower(s.ProjectName) {
+			t.Fatalf("session not lowercased: %+v", s)
+		}
 	}
 }
 
@@ -244,7 +278,7 @@ func TestRenameProjectForMonthKeepsOtherMonths(t *testing.T) {
 	}
 	jan, _ := database.GetMonthData(2026, 1)
 	feb, _ := database.GetMonthData(2026, 2)
-	if jan.Projects[0].Name != "Draft" || feb.Projects[0].Name != "Final" {
+	if jan.Projects[0].Name != "draft" || feb.Projects[0].Name != "final" {
 		t.Fatalf("expected Draft in January and Final in February, got %+v / %+v", jan.Projects, feb.Projects)
 	}
 }
@@ -268,7 +302,7 @@ func TestMonthDataSplitsSessionsAtMidnight(t *testing.T) {
 	if day11.Sessions[0].DurationSeconds != 7200 {
 		t.Errorf("segments must keep the full session for editing")
 	}
-	if len(month.Projects) != 1 || month.Projects[0].Name != "Night" {
+	if len(month.Projects) != 1 || month.Projects[0].Name != "night" {
 		t.Errorf("unexpected month projects %+v", month.Projects)
 	}
 }
@@ -315,7 +349,7 @@ func TestStatsAggregation(t *testing.T) {
 	if stats.PomodoroCount != 3 || stats.FreeCount != 1 {
 		t.Errorf("unexpected mode counts %d/%d", stats.PomodoroCount, stats.FreeCount)
 	}
-	if stats.Projects[0].ProjectName != "A" || stats.Projects[0].TotalSeconds != 3*3600 || stats.Projects[0].AverageDuration != 5400 {
+	if stats.Projects[0].ProjectName != "a" || stats.Projects[0].TotalSeconds != 3*3600 || stats.Projects[0].AverageDuration != 5400 {
 		t.Errorf("unexpected top project %+v", stats.Projects[0])
 	}
 	if stats.WeekdayDistribution[0] != 3*3600 || stats.HourlyDistribution[9] != 3*3600 || stats.HourlyDistribution[10] != 3600 {
@@ -361,7 +395,7 @@ func TestImportDeduplicatesAndSkipsInvalid(t *testing.T) {
 		t.Fatalf("export round-trip created %d duplicates", imported)
 	}
 
-	dev := mustFind(t, database, "Dev")
+	dev := mustFind(t, database, "dev")
 	if want := time.Date(2026, 1, 6, 9, 0, 0, 0, time.Local); !dev.StartTime.Equal(want) {
 		t.Errorf("zoneless CSV times must be local: got %v, want %v", dev.StartTime, want)
 	}

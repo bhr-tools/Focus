@@ -9,7 +9,7 @@ import (
 )
 
 // DefaultProjectName is used whenever a project name is blank.
-const DefaultProjectName = "Focus"
+const DefaultProjectName = "focus"
 
 // execQuerier is satisfied by both *sql.DB and *sql.Tx.
 type execQuerier interface {
@@ -17,9 +17,15 @@ type execQuerier interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
+// projectName trims and lowercases a project name: names are stored in
+// lowercase only, so that "Maths" and "maths" are one spelling everywhere.
+func projectName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 func normalizeProjectName(name string) string {
-	if trimmed := strings.TrimSpace(name); trimmed != "" {
-		return trimmed
+	if name := projectName(name); name != "" {
+		return name
 	}
 	return DefaultProjectName
 }
@@ -306,14 +312,15 @@ func (d *DB) RenameProject(oldName, newName string) (string, error) {
 }
 
 // renameProject moves the sessions of oldName intersecting [from, to) to
-// newName. A change of case only renames the project itself (names are
-// case-insensitive, so it applies everywhere). The old project is deleted
-// once no session uses it anymore.
+// newName. The old project is deleted once no session uses it anymore.
 func (d *DB) renameProject(oldName, newName string, from, to time.Time) (string, error) {
-	oldName = strings.TrimSpace(oldName)
-	newName = strings.TrimSpace(newName)
+	oldName = projectName(oldName)
+	newName = projectName(newName)
 	if oldName == "" || newName == "" {
 		return "", fmt.Errorf("project name cannot be empty")
+	}
+	if oldName == newName {
+		return newName, nil
 	}
 
 	tx, err := d.conn.Begin()
@@ -322,17 +329,6 @@ func (d *DB) renameProject(oldName, newName string, from, to time.Time) (string,
 	}
 	defer tx.Rollback()
 	now := formatTime(time.Now())
-
-	if strings.EqualFold(oldName, newName) {
-		if _, err := tx.Exec(`UPDATE projects SET name = ? WHERE name = ?`, newName, oldName); err != nil {
-			return "", fmt.Errorf("rename project: %w", err)
-		}
-		if _, err := tx.Exec(`UPDATE sessions SET project_name = ?, updated_at = ? WHERE project_name = ?`,
-			newName, now, oldName); err != nil {
-			return "", fmt.Errorf("rename sessions: %w", err)
-		}
-		return newName, tx.Commit()
-	}
 
 	p, err := getOrCreateProject(tx, newName)
 	if err != nil {

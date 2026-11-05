@@ -50,7 +50,7 @@ func TestEngineStopRecordsSession(t *testing.T) {
 	if len(sessions) != 1 {
 		t.Fatalf("expected 1 session recorded, got %d", len(sessions))
 	}
-	if sessions[0].ProjectName != "Deepwork Systems" || sessions[0].Mode != db.ModeFree {
+	if sessions[0].ProjectName != "deepwork systems" || sessions[0].Mode != db.ModeFree {
 		t.Errorf("unexpected session %+v", sessions[0])
 	}
 	if sessions[0].DurationSeconds != 120 {
@@ -154,7 +154,7 @@ func TestEngineSetModeIgnoredWhileActive(t *testing.T) {
 		t.Fatalf("mode changed during an active session")
 	}
 	engine.Cancel()
-	if s := engine.SetMode(db.ModeFree, "Other"); s.Mode != db.ModeFree || s.Project != "Other" {
+	if s := engine.SetMode(db.ModeFree, "Other"); s.Mode != db.ModeFree || s.Project != "other" {
 		t.Fatalf("expected free mode on Other, got %s on %s", s.Mode, s.Project)
 	}
 }
@@ -187,7 +187,7 @@ func TestSubscribersAlwaysGetLatestSnapshot(t *testing.T) {
 
 	select {
 	case snap := <-ch:
-		if snap.Project != "B" || snap.Status != StatusPaused {
+		if snap.Project != "b" || snap.Status != StatusPaused {
 			t.Fatalf("expected latest snapshot (B, paused), got %s %s", snap.Project, snap.Status)
 		}
 	case <-time.After(time.Second):

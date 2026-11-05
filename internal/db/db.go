@@ -214,6 +214,9 @@ func (d *DB) initSchema() error {
 	if err := d.backfillUUIDs(); err != nil {
 		return err
 	}
+	if err := d.lowercaseProjects(); err != nil {
+		return err
+	}
 
 	defaults := map[string]string{
 		SettingWorkDuration:  "60",
@@ -244,6 +247,70 @@ func (d *DB) columnNames(table string) (map[string]bool, error) {
 			return nil, err
 		}
 		names[strings.ToLower(name)] = true
+	}
+	return names, rows.Err()
+}
+
+// lowercaseProjects converts project names written before names were
+// lowercased. Two projects that only differ by case (possible for non-ASCII
+// letters, which SQLite's NOCASE ignores) are merged into the lowercase one.
+func (d *DB) lowercaseProjects() error {
+	names, err := d.distinctNames(`SELECT name COLLATE BINARY FROM projects
+		UNION SELECT project_name COLLATE BINARY FROM sessions`)
+	if err != nil {
+		return err
+	}
+	var renames []string
+	for _, name := range names {
+		if name != projectName(name) {
+			renames = append(renames, name)
+		}
+	}
+	if len(renames) == 0 {
+		return nil
+	}
+
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := formatTime(time.Now())
+	for _, old := range renames {
+		lower := projectName(old)
+		var existing int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM projects WHERE name = ? COLLATE BINARY`, lower).Scan(&existing); err != nil {
+			return fmt.Errorf("lowercase projects: %w", err)
+		}
+		if existing > 0 {
+			_, err = tx.Exec(`DELETE FROM projects WHERE name = ? COLLATE BINARY`, old)
+		} else {
+			_, err = tx.Exec(`UPDATE projects SET name = ? WHERE name = ? COLLATE BINARY`, lower, old)
+		}
+		if err != nil {
+			return fmt.Errorf("lowercase project %q: %w", old, err)
+		}
+		if _, err := tx.Exec(`UPDATE sessions SET project_name = ?, updated_at = ? WHERE project_name = ? COLLATE BINARY`,
+			lower, now, old); err != nil {
+			return fmt.Errorf("lowercase sessions of %q: %w", old, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) distinctNames(query string) ([]string, error) {
+	rows, err := d.conn.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
 	}
 	return names, rows.Err()
 }
