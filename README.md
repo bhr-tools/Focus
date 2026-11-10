@@ -62,16 +62,6 @@ If you use Nix with flakes enabled, you can run or install Focus directly:
     ```
     
 
-### 3. Docker
-
-```
-docker compose up -d --build
-```
-
-Open `http://127.0.0.1:8765`. Data lives in the `focus-data` volume (`/data/focus.db`).
-Set `TZ` in `docker-compose.yml` to your time zone: days and months are computed in local time.
-The port is only published on `127.0.0.1`; put a reverse proxy with HTTPS in front of it to expose it.
-
 ### Network exposure
 
 The daemon listens on `127.0.0.1` by default (`-host` or `$HOST` to change it). Until a password
