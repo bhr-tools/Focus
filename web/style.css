@@ -1596,6 +1596,30 @@ td.col-total {
   color: var(--text-muted);
 }
 
+/* Connecting an app */
+.connect-ask {
+  font-size: 15px;
+  text-align: center;
+}
+
+.apps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.app-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.app-row .app-when {
+  flex: 1;
+  color: var(--text-dim);
+}
+
 /* ==================== RESPONSIVE ==================== */
 @media (max-width: 1000px) {
   .timer-layout {

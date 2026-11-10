@@ -389,6 +389,11 @@
         <input type="password" id="pwd-confirm" class="form-input" required autocomplete="new-password">
       </div>
       <p class="form-note">Changing the password signs out every other device and CLI.</p>
+      <div class="form-group" id="apps-group" hidden>
+        <span class="form-label">Connected apps</span>
+        <div id="apps-list" class="apps-list"></div>
+        <p class="form-note">They read your hours until you disconnect them, even after a password change.</p>
+      </div>
       <p id="password-error" class="form-error" hidden></p>
       <div class="dialog-actions">
         <button type="button" id="btn-logout" class="btn btn-ghost btn-ghost-danger">Log out</button>
@@ -440,6 +445,28 @@
       <p id="auth-error" class="form-error" hidden></p>
       <button type="submit" id="auth-submit" class="btn btn-primary btn-block">Unlock</button>
     </form>
+  </div>
+
+  <!-- ==================== CONNECT AN APP ==================== -->
+  <div id="connect-overlay" class="auth-overlay" hidden>
+    <div class="auth-card">
+      <div class="auth-brand">
+        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="12" cy="12" r="10"></circle>
+          <circle cx="12" cy="12" r="5"></circle>
+          <circle cx="12" cy="12" r="1.5" fill="currentColor"></circle>
+        </svg>
+        <h2 class="auth-title">Connect an app</h2>
+      </div>
+      <p class="connect-ask"><b id="connect-app"></b> wants to read the hours you time.</p>
+      <p class="auth-subtitle">It will see how long you worked each day and on which project. It cannot change anything. Asked by <b id="connect-host"></b>.</p>
+      <p class="form-note">Disconnect it whenever you like, in Menu → Password &amp; security.</p>
+      <p id="connect-error" class="form-error" hidden></p>
+      <div class="dialog-actions-end">
+        <button type="button" id="connect-deny" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="connect-allow" class="btn btn-primary">Allow</button>
+      </div>
+    </div>
   </div>
 
   <datalist id="project-options"></datalist>

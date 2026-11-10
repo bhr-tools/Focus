@@ -309,3 +309,69 @@ func TestVirtualMP3Reader(t *testing.T) {
 		t.Fatalf("after seek got %q", buf[:n])
 	}
 }
+
+// An app is connected by the user, reads the month view only, and is
+// disconnected by the user or by itself.
+func TestConnectApp(t *testing.T) {
+	h, database := setupTestServer(t)
+	hash, _ := db.HashPassword("pw")
+	_ = database.SetPasswordHash(hash)
+	user := []string{"Authorization", "Bearer local-secret"}
+	back := "https://assistant.example.com/api/focus/callback"
+
+	if w := call(t, h, http.MethodPost, "/api/connect", map[string]string{"app": "Assistant", "redirect_uri": back}); w.Code != http.StatusUnauthorized {
+		t.Fatalf("connect without login: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, "/api/connect", map[string]string{"app": "Assistant", "redirect_uri": "javascript:alert(1)"}, user...); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad redirect: %d", w.Code)
+	}
+	w := call(t, h, http.MethodPost, "/api/connect", map[string]string{"app": "Assistant", "redirect_uri": back}, user...)
+	if w.Code != http.StatusOK {
+		t.Fatalf("connect: %d %s", w.Code, w.Body.String())
+	}
+	code := decode[map[string]string](t, w)["code"]
+
+	if w := call(t, h, http.MethodPost, "/api/connect/token", map[string]string{"code": code, "redirect_uri": "https://evil.example.com/"}); w.Code != http.StatusBadRequest {
+		t.Fatalf("code for another address: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, "/api/connect/token", map[string]string{"code": code, "redirect_uri": back}); w.Code != http.StatusBadRequest {
+		t.Fatalf("a code works once, even after a wrong try: %d", w.Code)
+	}
+	code = decode[map[string]string](t, call(t, h, http.MethodPost, "/api/connect", map[string]string{"app": "Assistant", "redirect_uri": back}, user...))["code"]
+	w = call(t, h, http.MethodPost, "/api/connect/token", map[string]string{"code": code, "redirect_uri": back})
+	if w.Code != http.StatusOK {
+		t.Fatalf("token: %d %s", w.Code, w.Body.String())
+	}
+	app := []string{"Authorization", "Bearer " + decode[map[string]string](t, w)["token"]}
+
+	if w := call(t, h, http.MethodGet, "/api/month?year=2026&month=11", nil, app...); w.Code != http.StatusOK {
+		t.Fatalf("app reads the month: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodGet, "/api/state", nil, app...); w.Code != http.StatusUnauthorized {
+		t.Fatalf("app reads the state: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, "/api/sessions", map[string]any{}, app...); w.Code != http.StatusUnauthorized {
+		t.Fatalf("app writes: %d", w.Code)
+	}
+
+	apps := decode[[]db.App](t, call(t, h, http.MethodGet, "/api/apps", nil, user...))
+	if len(apps) != 1 || apps[0].Name != "Assistant" || apps[0].UsedAt == "" {
+		t.Fatalf("apps: %+v", apps)
+	}
+	if w := call(t, h, http.MethodDelete, fmt.Sprintf("/api/apps/%d", apps[0].ID), nil, user...); w.Code != http.StatusOK {
+		t.Fatalf("disconnect: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodGet, "/api/month?year=2026&month=11", nil, app...); w.Code != http.StatusUnauthorized {
+		t.Fatalf("disconnected app still reads: %d", w.Code)
+	}
+
+	// The app leaving by itself.
+	code = decode[map[string]string](t, call(t, h, http.MethodPost, "/api/connect", map[string]string{"app": "Assistant", "redirect_uri": back}, user...))["code"]
+	app = []string{"Authorization", "Bearer " + decode[map[string]string](t, call(t, h, http.MethodPost, "/api/connect/token", map[string]string{"code": code, "redirect_uri": back}))["token"]}
+	if w := call(t, h, http.MethodDelete, "/api/connect", nil, app...); w.Code != http.StatusOK {
+		t.Fatalf("leave: %d", w.Code)
+	}
+	if apps := decode[[]db.App](t, call(t, h, http.MethodGet, "/api/apps", nil, user...)); len(apps) != 0 {
+		t.Fatalf("apps after leaving: %+v", apps)
+	}
+}

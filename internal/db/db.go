@@ -172,6 +172,14 @@ func (d *DB) initSchema() error {
 			token_hash TEXT PRIMARY KEY,
 			expires_at INTEGER NOT NULL
 		)`,
+		// Apps connected by the user (see apps.go); times are Unix timestamps.
+		`CREATE TABLE IF NOT EXISTS app_tokens (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			token_hash TEXT UNIQUE NOT NULL,
+			created_at INTEGER NOT NULL,
+			used_at INTEGER
+		)`,
 		// Replaced by auth_tokens (plaintext tokens, driver-dependent date format).
 		`DROP TABLE IF EXISTS auth_sessions`,
 	}

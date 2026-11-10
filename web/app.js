@@ -1101,6 +1101,7 @@ function initMenu() {
     setOpen(false);
     $('password-form').reset();
     showError($('password-error'), '');
+    loadApps();
     openDialog('password-dialog');
   });
   $('import-input').addEventListener('change', async (e) => {
@@ -1186,6 +1187,7 @@ async function checkAuth() {
     $('auth-overlay').hidden = true;
     document.body.classList.remove('locked');
     startApp();
+    showConnect();
     return;
   }
   authMode = status.has_password ? 'login' : 'setup';
@@ -1220,6 +1222,87 @@ async function submitAuth(e) {
   } finally {
     $('auth-submit').disabled = false;
   }
+}
+
+// ==================== CONNECTED APPS ====================
+// Another app (the Assistant…) asks to read the hours: it sends the user to
+// /?connect=<name>&redirect_uri=<url>&state=<s>. Once logged in, the user
+// allows or refuses; either way the browser goes back to the app.
+function connectRequest() {
+  const q = new URLSearchParams(location.search);
+  const app = q.get('connect');
+  if (!app) return null;
+  return { app, redirect: q.get('redirect_uri') || '', state: q.get('state') || '' };
+}
+
+function backToApp(req, params) {
+  const url = new URL(req.redirect);
+  for (const [k, v] of Object.entries({ ...params, state: req.state })) url.searchParams.set(k, v);
+  location.replace(url.toString());
+}
+
+function showConnect() {
+  const req = connectRequest();
+  if (!req) return;
+  let host = '';
+  try {
+    const u = new URL(req.redirect);
+    if (u.protocol === 'https:' || u.protocol === 'http:') host = u.host;
+  } catch { /* invalid: refused below */ }
+  const done = () => {
+    $('connect-overlay').hidden = true;
+    history.replaceState(null, '', location.pathname);
+  };
+  $('connect-app').textContent = req.app;
+  $('connect-host').textContent = host || 'an unknown address';
+  showError($('connect-error'), host ? '' : 'This request has no valid address to come back to.');
+  $('connect-allow').disabled = !host;
+  $('connect-allow').onclick = async () => {
+    $('connect-allow').disabled = true;
+    try {
+      const { code } = await api('/api/connect', { method: 'POST', body: { app: req.app, redirect_uri: req.redirect } });
+      backToApp(req, { code });
+    } catch (err) {
+      showError($('connect-error'), err.message);
+      $('connect-allow').disabled = false;
+    }
+  };
+  $('connect-deny').onclick = () => {
+    if (host) backToApp(req, { error: 'access_denied' });
+    else done();
+  };
+  $('connect-overlay').hidden = false;
+}
+
+async function loadApps() {
+  let apps = [];
+  try { apps = await api('/api/apps'); } catch { /* shown empty */ }
+  $('apps-group').hidden = !apps.length;
+  $('apps-list').replaceChildren(...apps.map((a) => {
+    const row = document.createElement('div');
+    row.className = 'app-row';
+    const name = document.createElement('b');
+    name.textContent = a.name;
+    const when = document.createElement('span');
+    when.className = 'app-when';
+    const day = (iso) => new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+    when.textContent = a.used_at ? `read ${day(a.used_at)}` : `connected ${day(a.created_at)}`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-ghost btn-ghost-danger';
+    btn.textContent = 'Disconnect';
+    btn.onclick = async () => {
+      try {
+        await api(`/api/apps/${a.id}`, { method: 'DELETE' });
+        toast(`${a.name} disconnected`);
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+      loadApps();
+    };
+    row.append(name, when, btn);
+    return row;
+  }));
 }
 
 // startApp (re)connects the live stream and loads the data; it also runs

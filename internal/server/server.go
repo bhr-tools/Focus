@@ -34,6 +34,7 @@ type Server struct {
 	mux        *http.ServeMux
 	localToken string     // shared secret for the CLI on this host; "" disables it
 	loginMu    sync.Mutex // serializes password checks to slow down brute force
+	connect    connectCodes
 }
 
 func NewServer(database *db.DB, engine *timer.Engine, assets fs.FS, localToken string) *Server {
@@ -60,6 +61,8 @@ func (s *Server) registerRoutes() {
 		"POST /api/auth/logout":      s.handleAuthLogout,
 		"GET /api/theme":             s.handleTheme,
 		"GET /api/audio/session.mp3": s.handleAudioSession,
+		"POST /api/connect/token":    s.handleConnectToken,
+		"DELETE /api/connect":        s.handleDisconnectSelf,
 	}
 	protected := map[string]http.HandlerFunc{
 		"POST /api/auth/change-password":  s.handleAuthChangePassword,
@@ -84,11 +87,18 @@ func (s *Server) registerRoutes() {
 		"POST /api/settings":              s.handleSetSettings,
 		"GET /api/export":                 s.handleExport,
 		"POST /api/import":                s.handleImport,
+		"POST /api/connect":               s.handleConnect,
+		"GET /api/apps":                   s.handleListApps,
+		"DELETE /api/apps/{id}":           s.handleDeleteApp,
 	}
 	for pattern, h := range public {
 		s.mux.HandleFunc(pattern, h)
 	}
 	for pattern, h := range protected {
+		if p, ok := strings.CutPrefix(pattern, "GET "); ok && appReadable[p] {
+			s.mux.HandleFunc(pattern, s.appAuthed(h))
+			continue
+		}
 		s.mux.HandleFunc(pattern, s.authed(h))
 	}
 
