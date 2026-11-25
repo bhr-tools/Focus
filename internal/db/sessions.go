@@ -354,3 +354,23 @@ func monthBounds(year, month int) (time.Time, time.Time) {
 	from := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.Local)
 	return from, from.AddDate(0, 1, 0)
 }
+
+// DeleteProjectIfUnused removes a project that has no session: choosing a
+// project in the timer creates it, so names typed and then abandoned would
+// otherwise stay in the suggestions forever.
+func (d *DB) DeleteProjectIfUnused(name string) error {
+	_, err := d.conn.Exec(`
+		DELETE FROM projects
+		WHERE name = ? AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.project_name = projects.name)`,
+		normalizeProjectName(name))
+	return err
+}
+
+// PruneUnusedProjects removes every project without a session, except keep.
+func (d *DB) PruneUnusedProjects(keep string) error {
+	_, err := d.conn.Exec(`
+		DELETE FROM projects
+		WHERE name <> ? AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.project_name = projects.name)`,
+		normalizeProjectName(keep))
+	return err
+}

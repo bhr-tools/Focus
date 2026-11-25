@@ -194,3 +194,41 @@ func TestSubscribersAlwaysGetLatestSnapshot(t *testing.T) {
 		t.Fatal("no snapshot received")
 	}
 }
+
+func TestEngineDropsAbandonedProjects(t *testing.T) {
+	engine, database := setupTestEngine(t)
+
+	engine.Start("used", db.ModeFree, "client-1")
+	rewind(engine, 60*time.Second)
+	engine.Stop()
+
+	// Names picked then replaced without any session are not kept.
+	engine.SetProject("dee")
+	engine.SetProject("deeowork")
+	engine.SetProject("used")
+
+	names := func() []string {
+		projects, err := database.ListProjects()
+		if err != nil {
+			t.Fatalf("list projects: %v", err)
+		}
+		var out []string
+		for _, p := range projects {
+			out = append(out, p.Name)
+		}
+		return out
+	}
+	if got := names(); len(got) != 1 || got[0] != "used" {
+		t.Errorf("expected only [used], got %v", got)
+	}
+
+	// Projects left over from before are pruned on start, except the current one.
+	if _, err := database.GetOrCreateProject("testing"); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewEngine(database, "")
+	defer restarted.Close()
+	if got := names(); len(got) != 1 || got[0] != "used" {
+		t.Errorf("expected leftovers pruned, got %v", got)
+	}
+}

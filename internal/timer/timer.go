@@ -109,6 +109,9 @@ func NewEngine(database *db.DB, statePath string) *Engine {
 	if p, err := database.GetOrCreateProject(project); err == nil {
 		project, color = p.Name, p.Color
 	}
+	if err := database.PruneUnusedProjects(project); err != nil {
+		log.Printf("timer: prune projects: %v", err)
+	}
 
 	e := &Engine{
 		db:           database,
@@ -281,7 +284,14 @@ func (e *Engine) setProjectLocked(name string) {
 		log.Printf("timer: set project: %v", err)
 		return
 	}
+	previous := e.project
 	e.project, e.projectColor = p.Name, p.Color
+	// A project chosen but never used (typo, abandoned name) is not kept.
+	if previous != "" && previous != p.Name {
+		if err := e.db.DeleteProjectIfUnused(previous); err != nil {
+			log.Printf("timer: drop unused project: %v", err)
+		}
+	}
 }
 
 func (e *Engine) setModeLocked(mode string) {
