@@ -113,7 +113,7 @@
             <div class="project-picker">
               <div class="field project-field">
                 <span id="project-color-dot" class="color-dot"></span>
-                <input type="text" id="project-input" placeholder="Project" autocomplete="off" aria-label="Project">
+                <input type="text" id="project-input" placeholder="Project" autocomplete="off" spellcheck="false" aria-label="Project">
                 <div class="project-dropdown">
                   <button type="button" id="btn-project-dropdown" class="chip-btn" title="Projects of this month">
                     <span>Projects</span>
@@ -123,7 +123,6 @@
                   <select id="project-select" class="project-select" aria-label="Projects of this month"></select>
                 </div>
               </div>
-              <div id="project-menu" class="popover-menu project-menu" hidden></div>
             </div>
 
             <div class="field durations" id="durations">
@@ -318,7 +317,9 @@
       </div>
       <div class="form-group">
         <label for="session-project" class="form-label">Project</label>
-        <input type="text" id="session-project" class="form-input" required autocomplete="off" list="project-options">
+        <div class="project-picker">
+          <input type="text" id="session-project" class="form-input" required autocomplete="off" spellcheck="false">
+        </div>
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -356,7 +357,9 @@
       </div>
       <div class="form-group">
         <label for="rename-input" class="form-label">New name</label>
-        <input type="text" id="rename-input" class="form-input" required autocomplete="off" list="project-options">
+        <div class="project-picker">
+          <input type="text" id="rename-input" class="form-input" required autocomplete="off" spellcheck="false">
+        </div>
       </div>
       <p id="rename-note" class="form-note"></p>
       <p id="rename-error" class="form-error" hidden></p>
@@ -469,7 +472,6 @@
     </div>
   </div>
 
-  <datalist id="project-options"></datalist>
   <div id="tooltip" class="tooltip" hidden></div>
   <audio id="alarm-audio" playsinline preload="auto" src="alarm.mp3"></audio>
   <audio id="session-audio" playsinline preload="none"></audio>

@@ -384,9 +384,10 @@ function toggleTimer() {
 }
 
 // ==================== PROJECT PICKER ====================
-// Typing in the project field opens a panel of matching projects, so that an
+// Typing in a project field opens a panel of matching projects, so that an
 // existing project is reused instead of being created again under a variant.
-const picker = { items: [], active: -1 };
+// The timer field and the dialog fields share this menu.
+const pickers = [];
 
 function findProject(name) {
   const key = (name || '').trim().toLowerCase();
@@ -426,9 +427,7 @@ async function loadProjects() {
   select.options[0].disabled = true;
   for (const p of state.monthProjects) select.append(new Option(p.name, p.name));
 
-  const options = $('project-options');
-  options.replaceChildren(...state.allProjects.map((p) => new Option(p.name)));
-  if (!$('project-menu').hidden) openProjectMenu($('project-input').value);
+  for (const picker of pickers) if (picker.isOpen()) picker.open(picker.input.value);
 }
 
 // projectMatches ranks projects containing the query: prefix matches first.
@@ -441,58 +440,126 @@ function projectMatches(query) {
     .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
 }
 
-function openProjectMenu(query) {
-  if (!state.timer || state.timer.status !== 'idle') return;
-  const menu = $('project-menu');
-  const typed = query.trim();
-  const matches = projectMatches(query);
-  picker.items = matches.map((p) => ({ name: p.name, color: p.color }));
-  if (typed && !findProject(typed)) picker.items.push({ name: typed, create: true });
-  picker.active = typed && picker.items.length > 0 ? 0 : -1;
+// createProjectPicker wires the menu to a text field. The menu is placed in the
+// field's .project-picker container. Options:
+//   canOpen()      false keeps the menu closed (timer running)
+//   onChoose(name) called with the chosen project name
+//   onToggle(open) called when the menu opens or closes
+//   onEnter()      Enter with no highlighted entry
+function createProjectPicker(input, { canOpen = () => true, onChoose, onToggle = () => {}, onEnter = () => {} }) {
+  const container = input.closest('.project-picker');
+  const menu = document.createElement('div');
+  menu.className = 'popover-menu project-menu';
+  menu.hidden = true;
+  container.append(menu);
+  let items = [];
+  let active = -1;
 
-  const header = document.createElement('div');
-  header.className = 'menu-header';
-  header.textContent = typed ? 'Matching projects' : state.monthProjects.length > 0 ? 'This month' : 'Projects';
-  menu.replaceChildren(header);
-  if (picker.items.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'menu-empty';
-    empty.textContent = 'No project yet: type a name';
-    menu.append(empty);
+  function highlight(index) {
+    active = index;
+    menu.querySelectorAll('.menu-item').forEach((el, i) => {
+      el.classList.toggle('active', i === index);
+      if (i === index) el.scrollIntoView({ block: 'nearest' });
+    });
   }
-  picker.items.forEach((entry, i) => {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = entry.create ? 'menu-item create' : 'menu-item';
-    item.tabIndex = -1;
-    const label = document.createElement('span');
-    label.textContent = entry.create ? `Create “${entry.name}”` : entry.name;
-    item.append(entry.create ? colorDot('var(--text-dim)') : colorDot(entry.color), label);
-    // Keep the focus in the field: the selection happens on click.
-    item.addEventListener('pointerdown', (e) => e.preventDefault());
-    item.addEventListener('click', () => choosePickerItem(i));
-    menu.append(item);
+
+  function close() {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    active = -1;
+    onToggle(false);
+  }
+
+  function choose(index) {
+    const entry = items[index];
+    if (!entry) return;
+    close();
+    input.value = canonicalProjectName(entry.name);
+    onChoose(input.value);
+  }
+
+  function open(query) {
+    if (!canOpen()) return;
+    const typed = query.trim();
+    items = projectMatches(query).map((p) => ({ name: p.name, color: p.color }));
+    if (typed && !findProject(typed)) items.push({ name: typed, create: true });
+    active = typed && items.length > 0 ? 0 : -1;
+
+    const header = document.createElement('div');
+    header.className = 'menu-header';
+    header.textContent = typed ? 'Matching projects' : state.monthProjects.length > 0 ? 'This month' : 'Projects';
+    menu.replaceChildren(header);
+    if (items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'menu-empty';
+      empty.textContent = 'No project yet: type a name';
+      menu.append(empty);
+    }
+    items.forEach((entry, i) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = entry.create ? 'menu-item create' : 'menu-item';
+      item.tabIndex = -1;
+      const label = document.createElement('span');
+      label.textContent = entry.create ? `Create “${entry.name}”` : entry.name;
+      item.append(entry.create ? colorDot('var(--text-dim)') : colorDot(entry.color), label);
+      // Keep the focus in the field: the selection happens on click.
+      item.addEventListener('pointerdown', (e) => e.preventDefault());
+      item.addEventListener('click', () => choose(i));
+      menu.append(item);
+    });
+    const wasHidden = menu.hidden;
+    menu.hidden = false;
+    if (wasHidden) onToggle(true);
+    highlight(active);
+  }
+
+  lowercaseWhileTyping(input);
+  input.addEventListener('input', () => {
+    if (input.value.trim()) open(input.value);
+    else close();
   });
-  menu.hidden = false;
-  $('btn-project-dropdown').classList.add('open');
-  highlightPickerItem(picker.active);
+  input.addEventListener('blur', () => setTimeout(close, 0));
+  input.addEventListener('keydown', (e) => {
+    const isOpen = !menu.hidden;
+    switch (e.key) {
+      case 'ArrowDown':
+      case 'ArrowUp':
+        e.preventDefault();
+        if (!isOpen) {
+          open(input.value);
+        } else if (items.length > 0) {
+          const step = e.key === 'ArrowDown' ? 1 : -1;
+          highlight((active + step + items.length) % items.length);
+        }
+        break;
+      case 'Enter':
+        if (isOpen && active >= 0) {
+          e.preventDefault(); // do not submit the dialog form
+          choose(active);
+        } else {
+          onEnter(e);
+        }
+        break;
+      case 'Escape':
+        if (isOpen) {
+          e.preventDefault(); // close the menu, not the dialog
+          e.stopPropagation();
+          close();
+        }
+        break;
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!container.contains(e.target)) close();
+  });
+
+  const picker = { input, open, close, isOpen: () => !menu.hidden };
+  pickers.push(picker);
+  return picker;
 }
 
-function highlightPickerItem(index) {
-  picker.active = index;
-  $('project-menu').querySelectorAll('.menu-item').forEach((el, i) => {
-    el.classList.toggle('active', i === index);
-    if (i === index) el.scrollIntoView({ block: 'nearest' });
-  });
-}
-
-function choosePickerItem(index) {
-  const entry = picker.items[index];
-  if (!entry) return;
-  closeProjectMenu();
-  selectProject(entry.name);
-  $('project-input').blur();
-}
+let timerPicker = null;
 
 function selectProject(name) {
   if (!state.timer || state.timer.status !== 'idle' || !name.trim()) return;
@@ -503,18 +570,27 @@ function selectProject(name) {
 }
 
 function closeProjectMenu() {
-  $('project-menu').hidden = true;
-  $('btn-project-dropdown').classList.remove('open');
-  picker.active = -1;
+  for (const picker of pickers) picker.close();
 }
 
 function initProjectPicker() {
   const input = $('project-input');
-  ['project-input', 'session-project', 'rename-input'].forEach((id) => lowercaseWhileTyping($(id)));
+  timerPicker = createProjectPicker(input, {
+    canOpen: () => Boolean(state.timer && state.timer.status === 'idle'),
+    onChoose: (name) => {
+      selectProject(name);
+      input.blur();
+    },
+    onToggle: (open) => $('btn-project-dropdown').classList.toggle('open', open),
+    onEnter: (e) => {
+      e.preventDefault();
+      input.blur();
+    },
+  });
   $('btn-project-dropdown').addEventListener('click', (e) => {
     e.stopPropagation();
-    if ($('project-menu').hidden) openProjectMenu('');
-    else closeProjectMenu();
+    if (timerPicker.isOpen()) timerPicker.close();
+    else timerPicker.open('');
   });
   $('project-select').addEventListener('change', (e) => {
     if (e.target.value) selectProject(e.target.value);
@@ -522,42 +598,15 @@ function initProjectPicker() {
   input.addEventListener('input', () => {
     const color = input.value.trim() ? projectColor(input.value) : state.timer && state.timer.project_color;
     $('project-color-dot').style.backgroundColor = color || 'var(--text-dim)';
-    if (input.value.trim()) openProjectMenu(input.value);
-    else closeProjectMenu();
   });
   // Leaving the field keeps the typed name, mapped onto an existing project.
   input.addEventListener('change', () => {
     const name = input.value.trim();
     if (name && state.timer && canonicalProjectName(name) !== state.timer.project) selectProject(name);
   });
-  input.addEventListener('blur', () => setTimeout(closeProjectMenu, 0));
-  input.addEventListener('keydown', (e) => {
-    const open = !$('project-menu').hidden;
-    const count = picker.items.length;
-    switch (e.key) {
-      case 'ArrowDown':
-      case 'ArrowUp':
-        e.preventDefault();
-        if (!open) {
-          openProjectMenu(input.value);
-        } else if (count > 0) {
-          const step = e.key === 'ArrowDown' ? 1 : -1;
-          highlightPickerItem((picker.active + step + count) % count);
-        }
-        break;
-      case 'Enter':
-        e.preventDefault();
-        if (open && picker.active >= 0) choosePickerItem(picker.active);
-        else input.blur();
-        break;
-      case 'Escape':
-        closeProjectMenu();
-        break;
-    }
-  });
-  document.addEventListener('click', (e) => {
-    if (!e.target.closest('.project-picker')) closeProjectMenu();
-  });
+
+  // Dialog fields: choosing only fills the field, the form is saved as usual.
+  for (const id of ['session-project', 'rename-input']) createProjectPicker($(id), { onChoose: () => {} });
 }
 
 // ==================== TODAY ====================
