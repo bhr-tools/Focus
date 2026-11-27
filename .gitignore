@@ -3,3 +3,4 @@ result
 *.db
 *.db-journal
 *.db-wal
+tests/e2e/out/

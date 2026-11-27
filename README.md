@@ -69,6 +69,16 @@ is set, the API is open: set one from the web UI before exposing Focus on a netw
 the shared base of the bhr-tools apps ([kit](https://github.com/bhr-tools/kit)): the master
 password, sessions and app tokens are the kit's.
 
+## Keyboard
+
+`Space` start / pause / resume · `n` next phase · `s` finish a stopwatch · `x` cancel ·
+`a` add an activity · `1` `2` `3` (or `&` `é` `"`) Timer / Month / Statistics ·
+`h` `l` previous / next month or period · `t` this one · `?` every key.
+
+## Tests
+
+`go test ./...` and `tests/e2e/run.sh` (Playwright from nixpkgs: the web app and the command line).
+
 ## Waybar Integration
 
 Focus exposes a real-time status output designed for status bars like Waybar.
