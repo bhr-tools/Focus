@@ -3,7 +3,6 @@
 package timer
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -13,8 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"focus/internal/db"
-	"focus/internal/paths"
+	"github.com/bhr-tools/focus/internal/db"
 )
 
 // Statuses and phases.
@@ -59,21 +57,9 @@ type StateSnapshot struct {
 	OriginClientID   string `json:"origin_client_id,omitempty"` // client that started the session
 }
 
-// StateFilePath is where the daemon mirrors its state for the CLI of the same
-// user; "" when no private directory is available (the file is then skipped).
-func StateFilePath() string {
-	path, err := paths.File("state.json")
-	if err != nil {
-		log.Printf("timer: no state file: %v", err)
-		return ""
-	}
-	return path
-}
-
 type Engine struct {
-	mu        sync.Mutex
-	db        *db.DB
-	statePath string // "" disables the state file
+	mu sync.Mutex
+	db *db.DB
 
 	mode         string
 	phase        string
@@ -98,8 +84,8 @@ type Engine struct {
 }
 
 // NewEngine restores the durations and last project from the database and
-// starts the ticker. statePath may be empty.
-func NewEngine(database *db.DB, statePath string) *Engine {
+// starts the ticker.
+func NewEngine(database *db.DB) *Engine {
 	project, err := database.GetLastProject()
 	if err != nil {
 		log.Printf("timer: read last project: %v", err)
@@ -115,7 +101,6 @@ func NewEngine(database *db.DB, statePath string) *Engine {
 
 	e := &Engine{
 		db:           database,
-		statePath:    statePath,
 		mode:         db.ModePomodoro,
 		phase:        PhaseWork,
 		status:       StatusIdle,
@@ -484,7 +469,6 @@ func (e *Engine) publishLocked() StateSnapshot {
 		}
 		ch <- snap
 	}
-	e.writeStateFile(snap)
 	return snap
 }
 
@@ -556,19 +540,6 @@ func formatClock(secs int) string {
 		return fmt.Sprintf("%02d:%02d:%02d", secs/3600, secs%3600/60, secs%60)
 	}
 	return fmt.Sprintf("%02d:%02d", secs/60, secs%60)
-}
-
-// writeStateFile atomically replaces the state file.
-func (e *Engine) writeStateFile(snap StateSnapshot) {
-	if e.statePath == "" {
-		return
-	}
-	data, err := json.Marshal(snap)
-	if err != nil {
-		return
-	}
-	// Best effort: the CLI falls back to the HTTP API (and this runs every second).
-	_ = paths.WriteFileAtomic(e.statePath, data)
 }
 
 // ==================== Host integration ====================

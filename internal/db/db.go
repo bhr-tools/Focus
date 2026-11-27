@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/bhr-tools/kit/store"
 )
 
 // ErrNotFound is returned when the targeted row does not exist.
@@ -74,6 +74,77 @@ type DB struct {
 	conn *sql.DB
 }
 
+// migrations are applied in order (PRAGMA user_version counts them). Never
+// edit a released one: append a new one.
+var migrations = []string{
+	// 1. The schema of the releases before numbered migrations; on their
+	// databases it changes nothing.
+	`CREATE TABLE IF NOT EXISTS projects (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT UNIQUE NOT NULL COLLATE NOCASE,
+		color TEXT NOT NULL,
+		color_index INTEGER NOT NULL,
+		created_at DATETIME NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS sessions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		uuid TEXT UNIQUE,
+		project_name TEXT NOT NULL COLLATE NOCASE,
+		mode TEXT NOT NULL,
+		start_time DATETIME NOT NULL,
+		end_time DATETIME NOT NULL,
+		duration_seconds INTEGER NOT NULL,
+		completed INTEGER NOT NULL DEFAULT 1,
+		note TEXT DEFAULT '',
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE TABLE IF NOT EXISTS settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS auth_tokens (
+		token_hash TEXT PRIMARY KEY,
+		expires_at INTEGER NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS app_tokens (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		token_hash TEXT UNIQUE NOT NULL,
+		created_at INTEGER NOT NULL,
+		used_at INTEGER
+	);
+	UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL;
+	UPDATE sessions SET note = '' WHERE note IS NULL;
+	CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time);
+	CREATE INDEX IF NOT EXISTS idx_sessions_project_name ON sessions(project_name);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid);`,
+
+	// 2. The password, logins and connected apps move to the kit's tables
+	// (kit/auth): nobody is signed out, connected apps keep their token.
+	// Hashes keep their algorithm under the kit's names (v2$, s1$).
+	`CREATE TABLE IF NOT EXISTS auth_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+	CREATE TABLE IF NOT EXISTS auth_sessions (token TEXT PRIMARY KEY, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+	CREATE TABLE IF NOT EXISTS kit_app_tokens (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		scope TEXT NOT NULL DEFAULT '',
+		token_hash TEXT NOT NULL UNIQUE,
+		created_at DATETIME NOT NULL,
+		used_at DATETIME
+	);
+	INSERT OR IGNORE INTO auth_settings (key, value)
+		SELECT 'password_hash', CASE WHEN value LIKE 'pbkdf2-sha256$%' THEN 'v2' || substr(value, 14) ELSE 's1$' || value END
+		FROM settings WHERE key = 'password_hash' AND value <> '';
+	DELETE FROM settings WHERE key = 'password_hash';
+	INSERT OR IGNORE INTO auth_sessions (token, created_at)
+		SELECT token_hash, strftime('%Y-%m-%d %H:%M:%S', 'now') FROM auth_tokens WHERE expires_at > CAST(strftime('%s', 'now') AS INTEGER);
+	INSERT OR IGNORE INTO kit_app_tokens (name, scope, token_hash, created_at, used_at)
+		SELECT name, 'read', token_hash, datetime(created_at, 'unixepoch'), CASE WHEN used_at THEN datetime(used_at, 'unixepoch') END
+		FROM app_tokens ORDER BY id;
+	DROP TABLE auth_tokens;
+	DROP TABLE app_tokens;`,
+}
+
 // DefaultPath returns ~/.local/share/focus/focus.db.
 func DefaultPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -92,26 +163,80 @@ func Open(dbPath string) (*DB, error) {
 		}
 		dbPath = p
 	}
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+	if err := upgradeUnversioned(dbPath); err != nil {
 		return nil, err
 	}
-
-	// Pragmas go in the DSN so that they apply to every pooled connection.
-	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
-	conn, err := sql.Open("sqlite", dsn)
+	conn, err := store.Open(dbPath, migrations)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite database: %w", err)
+		return nil, err
 	}
-	// SQLite allows a single writer anyway: one connection removes every
-	// "database is locked" race for this single-user application.
-	conn.SetMaxOpenConns(1)
-
 	database := &DB{conn: conn}
-	if err := database.initSchema(); err != nil {
+	if err := database.tidy(); err != nil {
 		conn.Close()
 		return nil, err
 	}
 	return database, nil
+}
+
+// upgradeUnversioned brings a database of the releases before numbered
+// migrations (user_version 0) to the shape migration 1 expects: the columns
+// added over time, and without the first login table, whose name the kit
+// now uses.
+func upgradeUnversioned(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		return nil // a new database
+	}
+	conn, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var version int
+	if err := conn.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version > 0 {
+		return err
+	}
+	columns := func(table string) (map[string]bool, error) {
+		rows, err := conn.Query(`SELECT lower(name) FROM pragma_table_info(?)`, table)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		names := map[string]bool{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			names[name] = true
+		}
+		return names, rows.Err()
+	}
+	sessions, err := columns("sessions")
+	if err != nil {
+		return err
+	}
+	if len(sessions) > 0 {
+		for _, c := range []string{"uuid TEXT", "updated_at DATETIME"} {
+			if !sessions[strings.Fields(c)[0]] {
+				if _, err := conn.Exec(`ALTER TABLE sessions ADD COLUMN ` + c); err != nil {
+					return fmt.Errorf("add column %s: %w", c, err)
+				}
+			}
+		}
+	}
+	if old, err := columns("auth_sessions"); err != nil {
+		return err
+	} else if old["expires_at"] {
+		if _, err := conn.Exec(`DROP TABLE auth_sessions`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SQL is the connection, for the kit's auth tables.
+func (d *DB) SQL() *sql.DB {
+	return d.conn
 }
 
 func (d *DB) Close() error {
@@ -142,90 +267,15 @@ func parseTime(s string) time.Time {
 	return time.Time{}
 }
 
-func (d *DB) initSchema() error {
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS projects (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT UNIQUE NOT NULL COLLATE NOCASE,
-			color TEXT NOT NULL,
-			color_index INTEGER NOT NULL,
-			created_at DATETIME NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS sessions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			uuid TEXT UNIQUE,
-			project_name TEXT NOT NULL COLLATE NOCASE,
-			mode TEXT NOT NULL,
-			start_time DATETIME NOT NULL,
-			end_time DATETIME NOT NULL,
-			duration_seconds INTEGER NOT NULL,
-			completed INTEGER NOT NULL DEFAULT 1,
-			note TEXT DEFAULT '',
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS settings (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		)`,
-		// Login tokens are stored hashed; expires_at is a Unix timestamp.
-		`CREATE TABLE IF NOT EXISTS auth_tokens (
-			token_hash TEXT PRIMARY KEY,
-			expires_at INTEGER NOT NULL
-		)`,
-		// Apps connected by the user (see apps.go); times are Unix timestamps.
-		`CREATE TABLE IF NOT EXISTS app_tokens (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			name TEXT NOT NULL,
-			token_hash TEXT UNIQUE NOT NULL,
-			created_at INTEGER NOT NULL,
-			used_at INTEGER
-		)`,
-		// Replaced by auth_tokens (plaintext tokens, driver-dependent date format).
-		`DROP TABLE IF EXISTS auth_sessions`,
-	}
-	for _, q := range statements {
-		if _, err := d.conn.Exec(q); err != nil {
-			return fmt.Errorf("init schema: %w", err)
-		}
-	}
-
-	// Columns added after the first release.
-	columns, err := d.columnNames("sessions")
-	if err != nil {
-		return err
-	}
-	if !columns["uuid"] {
-		if _, err := d.conn.Exec(`ALTER TABLE sessions ADD COLUMN uuid TEXT`); err != nil {
-			return fmt.Errorf("add uuid column: %w", err)
-		}
-	}
-	if !columns["updated_at"] {
-		if _, err := d.conn.Exec(`ALTER TABLE sessions ADD COLUMN updated_at DATETIME`); err != nil {
-			return fmt.Errorf("add updated_at column: %w", err)
-		}
-	}
-
-	migrations := []string{
-		`UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL`,
-		`UPDATE sessions SET note = '' WHERE note IS NULL`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_project_name ON sessions(project_name)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_uuid ON sessions(uuid)`,
-		`CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires ON auth_tokens(expires_at)`,
-	}
-	for _, q := range migrations {
-		if _, err := d.conn.Exec(q); err != nil {
-			return fmt.Errorf("migrate schema: %w", err)
-		}
-	}
-
+// tidy fixes rows written by older releases (missing UUIDs, project names
+// with capitals) and sets the default settings; it changes nothing twice.
+func (d *DB) tidy() error {
 	if err := d.backfillUUIDs(); err != nil {
 		return err
 	}
 	if err := d.lowercaseProjects(); err != nil {
 		return err
 	}
-
 	defaults := map[string]string{
 		SettingWorkDuration:  "60",
 		SettingBreakDuration: "10",
@@ -240,23 +290,6 @@ func (d *DB) initSchema() error {
 		}
 	}
 	return nil
-}
-
-func (d *DB) columnNames(table string) (map[string]bool, error) {
-	rows, err := d.conn.Query(`SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return nil, fmt.Errorf("inspect %s table: %w", table, err)
-	}
-	defer rows.Close()
-	names := make(map[string]bool)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		names[strings.ToLower(name)] = true
-	}
-	return names, rows.Err()
 }
 
 // lowercaseProjects converts project names written before names were

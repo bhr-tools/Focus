@@ -1,0 +1,89 @@
+/* Phone navigation (js/tabbar.js) and the large title of a view, plus the
+   forms of js/lock.js. Reads base.css roles. */
+
+.tabbar { display: none; }
+
+/* Password forms. */
+.auth-form { display: flex; flex-direction: column; gap: 14px; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field-label { color: var(--text-muted); font-size: var(--fs-sm); font-weight: 500; }
+.form-error {
+  padding: 8px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+  font-size: var(--fs-md);
+}
+
+@media (max-width: 768px) {
+  /* Translucent bar at the bottom, within thumb reach. */
+  .tabbar {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 900;
+    display: flex;
+    padding: 0 8px env(safe-area-inset-bottom);
+    background: var(--bar);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+    box-shadow: 0 -0.5px 0 var(--sep);
+  }
+  body.has-modal .tabbar { display: none; }
+  .tab {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    height: var(--tabbar-h);
+    color: var(--text-dim);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+  .tab.active { color: var(--accent); }
+  .tab-icon { position: relative; display: flex; }
+  .tab-icon .icon svg { width: 24px; height: 24px; stroke-width: 1.7; }
+  .tab .badge {
+    position: absolute;
+    top: -4px;
+    left: calc(100% - 8px);
+    min-width: 17px;
+    height: 17px;
+    padding: 0 5px;
+    border-radius: var(--r-full);
+    background: var(--surface-hover);
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 17px;
+    text-align: center;
+  }
+  .tab .badge.alert { background: var(--danger); color: var(--on-accent); }
+  .tab .badge:empty { display: none; }
+  /* Text tabs (Inventory): bigger labels, the count beside them. */
+  .tabbar.text .tab { font-size: var(--fs-md); }
+  .tabbar.text .tab.active .tab-label { text-decoration: underline 2px; text-underline-offset: 6px; }
+  .tabbar.text .badge { position: static; margin-left: 4px; }
+
+  /* Large title. Sticky and opaque: iOS 26 extends its colour under the
+     status bar instead of blurring the top of the page. */
+  .large-title {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: max(14px, env(safe-area-inset-top)) var(--gutter) 12px;
+    background: var(--bg);
+  }
+  .large-title h1 { flex: 1; min-width: 0; font-size: var(--fs-title); font-weight: 800; letter-spacing: -0.025em; line-height: 1.15; }
+
+  /* Content scrolls above the tab bar. */
+  body.has-tabbar main { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 24px); }
+}

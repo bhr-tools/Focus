@@ -30,16 +30,16 @@ Focus can be built and run on any Linux distribution using the standard Go toolc
     cd Focus
     ```
     
-2. **Build the binary:**
+2. **Build the server and the command line:**
     
     ```
-    go build -o focus ./cmd/focus
+    go build ./cmd/focus-server ./cmd/focus
     ```
     
-3. **Run the daemon:**
+3. **Run the server:**
     
     ```
-    ./focus daemon
+    ./focus-server -data-dir ~/.local/share/focus
     ```
     
     Open your browser at `http://127.0.0.1:8765`.
@@ -64,8 +64,10 @@ If you use Nix with flakes enabled, you can run or install Focus directly:
 
 ### Network exposure
 
-The daemon listens on `127.0.0.1` by default (`-host` or `$HOST` to change it). Until a password
-is set, the API is open: set one from the web UI before exposing Focus on a network.
+The server listens on `127.0.0.1` by default (`-host` or `$HOST` to change it). Until a password
+is set, the API is open: set one from the web UI before exposing Focus on a network. It runs on
+the shared base of the bhr-tools apps ([kit](https://github.com/bhr-tools/kit)): the master
+password, sessions and app tokens are the kit's.
 
 ## Waybar Integration
 
@@ -80,7 +82,6 @@ Add this module configuration to your `~/.config/waybar/config.jsonc`:
   "exec": "focus status --watch --json",
   "on-click": "focus toggle",
   "on-click-right": "focus next",
-  "on-click-middle": "focus menu",
   "tooltip": true
 }
 ```
@@ -92,18 +93,17 @@ Manage your timer directly from the terminal or keybindings:
 |   |   |
 |---|---|
 |**Command**|**Description**|
-|`focus daemon`|Start the HTTP server and web UI daemon|
+|`focus login <url>`|Sign in to a Focus server with its password; the token is named after the machine and can be revoked from the web app|
 |`focus status`|Output current timer status text|
-|`focus status --watch --json`|Stream real-time JSON state updates (one line per change)|
-|`focus login <url>`|Authenticate the CLI against a remote Focus server|
+|`focus status --watch --json`|Stream real-time JSON state updates (one line per change), with desktop alerts|
 |`focus toggle`|Toggle timer state (start / pause / resume)|
 |`focus pause`|Pause active timer session|
 |`focus resume`|Resume paused timer session|
 |`focus next`|Advance to the next phase (work to break, or break to work)|
-|`focus stop` / `focus finish`|Stop and save current session to SQLite|
+|`focus stop` / `focus finish`|Stop and save current session|
 |`focus cancel`|Cancel current session without recording|
 |`focus work`|Quick start Pomodoro work session|
 |`focus stopwatch`|Quick start free stopwatch session|
-|`focus menu`|Interactive fuzzy launcher menu (Fuzzel / Wofi / Rofi)|
-|`focus export`|Export session history (JSON or CSV)|
-|`focus import <file>`|Import history from backup file|
+|`focus start [-p project] [-m pomodoro\|free]`|Start a session for a project|
+
+Export and import live in the web app.

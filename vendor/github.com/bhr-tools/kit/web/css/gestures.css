@@ -1,0 +1,82 @@
+/* Drag and swipe feedback (js/drag.js, js/swipe.js). Reads base.css roles. */
+
+/* Where a dragged row lands: one line in the gap, with a dot where the row's
+   own marker (checkbox, icon) would be at that depth. */
+.drop-line {
+  position: fixed;
+  z-index: 2001;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 0 1px 1px 0;
+  background: var(--accent);
+  pointer-events: none;
+}
+.drop-line::before {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: -5px;
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--bg);
+}
+
+/* What a row is grabbed by (sortable's handle): dragging it never scrolls. */
+.drag-handle { touch-action: none; cursor: grab; color: var(--text-dim); }
+
+/* The row being dragged stays in place, faded; a ghost follows the pointer. */
+.dragging { opacity: 0.4; }
+body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select: none; }
+.drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 2002;
+  max-width: 280px;
+  padding: 4px 10px;
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: var(--fs-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* A target the row would be dropped on (a folder, a project). */
+.drop-target { background: var(--tint) !important; box-shadow: var(--ring); }
+
+/* Swipe actions under a row (phones). */
+.swipe { position: relative; overflow: hidden; }
+.swipe-action {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px;
+  background: var(--surface-hover);
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  font-weight: 700;
+  transition: background-color 0.15s, color 0.15s;
+}
+.swipe-left { justify-content: flex-end; }
+.swipe.to-left .swipe-left, .swipe.to-right .swipe-right { display: flex; }
+.swipe.armed .swipe-action { background: var(--accent); color: var(--on-accent); }
+.swipe.armed .swipe-action.danger { background: var(--danger); }
+.swipe.armed .swipe-action.move { background: var(--select); }
+.swipe-action .icon svg { transition: transform 0.15s; }
+.swipe.armed .swipe-action .icon svg { transform: scale(1.2); }
+
+.pull-hint { display: none; }
+@media (max-width: 768px) {
+  .swipe { touch-action: pan-y; }
+  .pull-hint { display: block; position: relative; height: 0; opacity: 0; }
+  .pull-hint span { position: absolute; top: 18px; right: 0; left: 0; color: var(--text-dim); font-size: var(--fs-sm); text-align: center; }
+  .pull-hint.ready span { color: var(--accent); font-weight: 600; }
+}

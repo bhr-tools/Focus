@@ -1,0 +1,221 @@
+/* Kit base layer: palette, roles, scales and the few controls every app
+   shares. Apps import it first, then override roles and scales in their own
+   style.css; kit components only ever read the roles below, never --rp-*.
+
+   Rosé Pine (https://rosepinetheme.com): main variant in dark mode, Dawn in
+   light mode, following the system setting. Accent: foam in dark, pine in
+   light (both pass 4.5:1 on their background). */
+
+/* ==========================================================================
+   Palette and roles
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+  --rp-base: #191724;
+  --rp-surface: #1f1d2e;
+  --rp-overlay: #26233a;
+  --rp-muted: #6e6a86;
+  --rp-subtle: #908caa;
+  --rp-text: #e0def4;
+  --rp-love: #eb6f92;
+  --rp-gold: #f6c177;
+  --rp-rose: #ebbcba;
+  --rp-pine: #31748f;
+  --rp-foam: #9ccfd8;
+  --rp-iris: #c4a7e7;
+  --rp-hl-low: #21202e;
+  --rp-hl-med: #403d52;
+  --rp-hl-high: #524f67;
+
+  /* Roles: what kit components read. */
+  --bg: var(--rp-base);              /* page */
+  --surface: var(--rp-surface);      /* dialogs, cards, fields */
+  --surface-hover: var(--rp-overlay); /* hover, pressed, cursor row */
+  --text: var(--rp-text);
+  --text-muted: var(--rp-subtle);    /* labels, secondary text */
+  --text-dim: var(--rp-muted);       /* placeholders, hints, done items */
+  --border: rgba(110, 106, 134, 0.28);
+  --accent: var(--rp-foam);
+  --on-accent: var(--rp-base);       /* text on a filled accent */
+  --danger: var(--rp-love);
+  --warn: var(--rp-gold);
+  --select: var(--rp-iris);          /* multi-selection */
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  --backdrop: rgba(8, 7, 14, 0.62);
+
+  /* Derived from the roles: an app overriding --accent gets them too. */
+  --tint: color-mix(in srgb, var(--accent) 12%, transparent);
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --rp-base: #faf4ed;
+    --rp-surface: #fffaf3;
+    --rp-overlay: #f2e9e1;
+    --rp-muted: #9893a5;
+    --rp-subtle: #797593;
+    --rp-text: #575279;
+    --rp-love: #b4637a;
+    --rp-gold: #ea9d34;
+    --rp-rose: #d7827e;
+    --rp-pine: #286983;
+    --rp-foam: #56949f;
+    --rp-iris: #907aa9;
+    --rp-hl-low: #f4ede8;
+    --rp-hl-med: #dfdad9;
+    --rp-hl-high: #cecacd;
+
+    --border: rgba(121, 117, 147, 0.25);
+    --accent: var(--rp-pine);
+    --on-accent: var(--rp-base);
+    --shadow: 0 10px 30px rgba(87, 82, 121, 0.18);
+    --backdrop: rgba(87, 82, 121, 0.35);
+  }
+}
+
+/* ==========================================================================
+   Scales
+   ========================================================================== */
+
+:root {
+  /* Radii. An app with square corners (Inventory) sets them all to 0. */
+  --r-sm: 6px;      /* controls: buttons, inputs, menu items, tags */
+  --r: 8px;         /* rows, list cards, segmented controls */
+  --r-lg: 10px;     /* cards */
+  --r-xl: 12px;     /* dialogs, grouped lists on phones */
+  --r-full: 999px;  /* pills, round checkboxes */
+
+  /* Type. */
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --fs-xs: 11.5px;  /* tags, badges, column heads */
+  --fs-sm: 12.5px;  /* labels, hints, meta */
+  --fs-md: 13px;    /* controls, dense text */
+  --fs: 14px;       /* body */
+  --fs-lg: 16px;    /* dialog titles, phone body */
+  --fs-xl: 20px;    /* view titles */
+  --fs-title: 32px; /* phone large title */
+
+  /* Sizes. */
+  --control-h: 32px; /* buttons, inputs, menu rows */
+  --row-h: 36px;     /* list rows */
+  --gutter: 20px;    /* page side padding */
+}
+
+/* Phones: bigger targets, 16px fields (iOS zooms into smaller ones). */
+@media (max-width: 768px) {
+  :root {
+    --control-h: 40px;
+    --row-h: 48px;
+    --gutter: 16px;
+    --tabbar-h: 54px;
+    --sep: color-mix(in srgb, var(--text-dim) 30%, transparent); /* hairlines of grouped lists */
+    --fill: color-mix(in srgb, var(--text-muted) 14%, transparent); /* pill buttons */
+    --bar: color-mix(in srgb, var(--surface) 78%, transparent);   /* translucent tab bar */
+  }
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: var(--fs)/1.5 var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; background: none; border: none; }
+button:disabled { cursor: default; opacity: 0.6; }
+a { color: inherit; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+* { scrollbar-width: thin; scrollbar-color: var(--surface-hover) transparent; }
+
+kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--r-sm);
+  background: var(--surface-hover);
+  color: var(--warn);
+  font: 600 var(--fs-xs)/1.6 var(--font-mono);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.icon svg { display: block; }
+
+/* ==========================================================================
+   Controls
+   ========================================================================== */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: var(--control-h);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+.button:hover { background: var(--surface-hover); color: var(--text); }
+.button.primary, .button.danger { border-color: transparent; color: var(--on-accent); font-weight: 600; }
+.button.primary { background: var(--accent); }
+.button.danger { background: var(--danger); }
+.button.primary:hover:not(:disabled), .button.danger:hover:not(:disabled) { filter: brightness(1.08); }
+.button.wide { width: 100%; }
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h);
+  height: var(--control-h);
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  transition: background-color 0.15s, color 0.15s;
+}
+.icon-button:hover { background: var(--surface-hover); color: var(--text); }
+
+.input {
+  width: 100%;
+  height: var(--control-h);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  outline: none;
+}
+textarea.input { height: auto; padding: 8px 10px; resize: vertical; }
+.input:focus { border-color: var(--accent); box-shadow: var(--ring); }
+.input::placeholder { color: var(--text-dim); }
+
+@media (max-width: 768px) {
+  .input, .input-16 { font-size: 16px; }
+  button, a, .row { touch-action: manipulation; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; }
+}

@@ -2,7 +2,6 @@
 package server
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,60 +11,66 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"focus/internal/db"
-	"focus/internal/timer"
+	"github.com/bhr-tools/kit/auth"
+
+	"github.com/bhr-tools/focus/internal/db"
+	"github.com/bhr-tools/focus/internal/timer"
 )
 
 const (
-	sessionCookie = "focus_session"
-	tokenTTL      = 365 * 24 * time.Hour
 	maxJSONBody   = 1 << 20  // 1 MiB
 	maxImportBody = 32 << 20 // 32 MiB
 	sseHeartbeat  = 25 * time.Second
 )
 
+// SessionCookie is the name of the browser's login cookie.
+const SessionCookie = "focus_session"
+
+// Token scopes: the command-line client may do everything the web app does;
+// a connected app only reads (appReadable).
+const (
+	scopeCLI  = "cli"
+	scopeRead = "read"
+)
+
 type Server struct {
-	db         *db.DB
-	engine     *timer.Engine
-	assets     fs.FS
-	mux        *http.ServeMux
-	localToken string     // shared secret for the CLI on this host; "" disables it
-	loginMu    sync.Mutex // serializes password checks to slow down brute force
-	connect    connectCodes
+	db      *db.DB
+	engine  *timer.Engine
+	auth    *auth.Auth
+	assets  fs.FS // the web files (alarm sounds)
+	mux     *http.ServeMux
+	connect connectCodes
 }
 
-func NewServer(database *db.DB, engine *timer.Engine, assets fs.FS, localToken string) *Server {
+// NewServer serves the API of the timer and the database; a guards it.
+func NewServer(database *db.DB, engine *timer.Engine, assets fs.FS, a *auth.Auth) *Server {
 	s := &Server{
-		db:         database,
-		engine:     engine,
-		assets:     assets,
-		mux:        http.NewServeMux(),
-		localToken: localToken,
+		db:     database,
+		engine: engine,
+		auth:   a,
+		assets: assets,
+		mux:    http.NewServeMux(),
 	}
 	s.registerRoutes()
 	return s
 }
 
+// Handler is the API, mounted on /api/ by kit/server.
 func (s *Server) Handler() http.Handler {
-	return securityHeaders(s.mux)
+	return s.mux
 }
 
 func (s *Server) registerRoutes() {
+	s.auth.Routes(s.mux) // /api/auth/*
 	public := map[string]http.HandlerFunc{
-		"GET /api/auth/status":       s.handleAuthStatus,
-		"POST /api/auth/setup":       s.handleAuthSetup,
-		"POST /api/auth/login":       s.handleAuthLogin,
-		"POST /api/auth/logout":      s.handleAuthLogout,
 		"GET /api/theme":             s.handleTheme,
 		"GET /api/audio/session.mp3": s.handleAudioSession,
 		"POST /api/connect/token":    s.handleConnectToken,
 		"DELETE /api/connect":        s.handleDisconnectSelf,
 	}
 	protected := map[string]http.HandlerFunc{
-		"POST /api/auth/change-password":  s.handleAuthChangePassword,
 		"GET /api/state":                  s.handleState,
 		"GET /api/events":                 s.handleEvents,
 		"POST /api/action":                s.handleAction,
@@ -95,29 +100,34 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc(pattern, h)
 	}
 	for pattern, h := range protected {
-		if p, ok := strings.CutPrefix(pattern, "GET "); ok && appReadable[p] {
-			s.mux.HandleFunc(pattern, s.appAuthed(h))
-			continue
-		}
 		s.mux.HandleFunc(pattern, s.authed(h))
 	}
-
-	// The UI must pick up a new binary immediately (no stale cached assets).
-	files := http.FileServerFS(s.assets)
-	s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-cache")
-		files.ServeHTTP(w, r)
-	})
+	// Only a signed-in browser hands out a command-line token.
+	s.mux.Handle("POST /api/cli-token", s.auth.Require(http.HandlerFunc(s.handleCLIToken)))
 }
 
-func securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "same-origin")
-		h.Set("X-Frame-Options", "DENY")
-		next.ServeHTTP(w, r)
-	})
+// allowed: the browser's login, or a token in "Authorization: Bearer": the
+// command line's (everything), a connected app's (appReadable only), or a
+// login token saved by an older command line.
+func (s *Server) allowed(r *http.Request) bool {
+	if s.auth.Authenticated(r) {
+		return true
+	}
+	if t := s.auth.RequestAppToken(r); t != nil {
+		return t.Scope == scopeCLI || (t.Scope == scopeRead && r.Method == http.MethodGet && appReadable[r.URL.Path])
+	}
+	bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return ok && s.auth.ValidateSession(bearer)
+}
+
+func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.allowed(r) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // ==================== Helpers ====================
@@ -178,6 +188,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering (nginx)
+
+	// The stream outlives the server's write timeout.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 
 	ch := s.engine.Subscribe()
 	defer s.engine.Unsubscribe(ch)
@@ -622,231 +635,6 @@ func (s *Server) handleSetSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.handleGetSettings(w, r)
-}
-
-// ==================== Authentication ====================
-
-func (s *Server) tokenValid(token string) bool {
-	if token == "" {
-		return false
-	}
-	if s.localToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.localToken)) == 1 {
-		return true
-	}
-	return s.db.ValidateAuthToken(token)
-}
-
-// requestTokens lists the credentials a request may carry.
-func requestTokens(r *http.Request) []string {
-	var tokens []string
-	if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
-		tokens = append(tokens, tok)
-	}
-	tokens = append(tokens, r.Header.Get("X-Focus-Token"), r.URL.Query().Get("token"))
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		tokens = append(tokens, c.Value)
-	}
-	return tokens
-}
-
-// isAuthenticated is true when no password is configured yet, or when the
-// request carries a valid token.
-func (s *Server) isAuthenticated(r *http.Request) bool {
-	hasPwd, err := s.db.HasPassword()
-	if err != nil {
-		log.Printf("server: read password: %v", err)
-		return false
-	}
-	if !hasPwd {
-		return true
-	}
-	for _, tok := range requestTokens(r) {
-		if s.tokenValid(tok) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.isAuthenticated(r) {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next(w, r)
-	}
-}
-
-// checkPassword verifies a password. Leading/trailing spaces are ignored, but
-// a hash created from an untrimmed password still matches.
-func checkPassword(password, hash string) bool {
-	return db.CheckPassword(strings.TrimSpace(password), hash) || db.CheckPassword(password, hash)
-}
-
-// issueToken creates a login token and sets it as the session cookie.
-func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) (string, bool) {
-	token, err := s.db.CreateAuthToken(tokenTTL)
-	if err != nil {
-		serverError(w, err)
-		return "", false
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    token,
-		Path:     "/",
-		MaxAge:   int(tokenTTL / time.Second),
-		HttpOnly: true,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
-		SameSite: http.SameSiteLaxMode,
-	})
-	return token, true
-}
-
-func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	hasPwd, err := s.db.HasPassword()
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	writeJSON(w, map[string]any{"has_password": hasPwd, "authenticated": s.isAuthenticated(r)})
-}
-
-func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Password string `json:"password"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	password := strings.TrimSpace(req.Password)
-	if password == "" {
-		http.Error(w, "Invalid password", http.StatusBadRequest)
-		return
-	}
-	hash, err := db.HashPassword(password)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	created, err := s.db.SetPasswordIfUnset(hash)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	if !created {
-		http.Error(w, "Password already configured", http.StatusConflict)
-		return
-	}
-	if token, ok := s.issueToken(w, r); ok {
-		writeJSON(w, map[string]any{"ok": true, "token": token})
-	}
-}
-
-func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Password string `json:"password"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-
-	s.loginMu.Lock()
-	hash, err := s.db.GetPasswordHash()
-	ok := err == nil && hash != "" && checkPassword(req.Password, hash)
-	if err == nil && hash != "" && !ok {
-		time.Sleep(time.Second) // at most one failed attempt per second
-	}
-	s.loginMu.Unlock()
-
-	switch {
-	case err != nil:
-		serverError(w, err)
-		return
-	case hash == "":
-		http.Error(w, "No password configured", http.StatusBadRequest)
-		return
-	case !ok:
-		http.Error(w, "Incorrect password", http.StatusUnauthorized)
-		return
-	}
-
-	if db.IsLegacyHash(hash) {
-		if upgraded, err := db.HashPassword(strings.TrimSpace(req.Password)); err == nil {
-			if err := s.db.SetPasswordHash(upgraded); err != nil {
-				log.Printf("server: upgrade password hash: %v", err)
-			}
-		}
-	}
-	if token, ok := s.issueToken(w, r); ok {
-		writeJSON(w, map[string]any{"ok": true, "token": token})
-	}
-}
-
-// handleAuthChangePassword replaces the password and revokes every other login.
-func (s *Server) handleAuthChangePassword(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		OldPassword string `json:"old_password"`
-		NewPassword string `json:"new_password"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	newPassword := strings.TrimSpace(req.NewPassword)
-	if newPassword == "" {
-		http.Error(w, "New password cannot be empty", http.StatusBadRequest)
-		return
-	}
-
-	s.loginMu.Lock()
-	hash, err := s.db.GetPasswordHash()
-	ok := err == nil && hash != "" && checkPassword(req.OldPassword, hash)
-	if err == nil && !ok {
-		time.Sleep(time.Second)
-	}
-	s.loginMu.Unlock()
-
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	if !ok {
-		http.Error(w, "Current password is incorrect", http.StatusUnauthorized)
-		return
-	}
-	newHash, err := db.HashPassword(newPassword)
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	if err := s.db.SetPasswordHash(newHash); err != nil {
-		serverError(w, err)
-		return
-	}
-	if err := s.db.DeleteAllAuthTokens(); err != nil {
-		serverError(w, err)
-		return
-	}
-	if token, ok := s.issueToken(w, r); ok {
-		writeJSON(w, map[string]any{"ok": true, "token": token})
-	}
-}
-
-func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
-		if err := s.db.DeleteAuthToken(c.Value); err != nil {
-			log.Printf("server: logout: %v", err)
-		}
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-	writeJSON(w, map[string]any{"ok": true})
 }
 
 // ==================== Import / export ====================

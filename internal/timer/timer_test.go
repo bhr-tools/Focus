@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"focus/internal/db"
+	"github.com/bhr-tools/focus/internal/db"
 )
 
 func setupTestEngine(t *testing.T) (*Engine, *db.DB) {
@@ -14,7 +14,7 @@ func setupTestEngine(t *testing.T) (*Engine, *db.DB) {
 	if err != nil {
 		t.Fatalf("failed to open test db: %v", err)
 	}
-	engine := NewEngine(database, "")
+	engine := NewEngine(database)
 	t.Cleanup(func() {
 		engine.Close()
 		database.Close()
@@ -168,7 +168,7 @@ func TestEngineDurationsPersistAndClamp(t *testing.T) {
 	if snap.TotalSeconds != 45*60 || snap.TimeStr != "45:00" {
 		t.Fatalf("idle countdown should follow the work duration, got %d (%s)", snap.TotalSeconds, snap.TimeStr)
 	}
-	restarted := NewEngine(database, "")
+	restarted := NewEngine(database)
 	defer restarted.Close()
 	if s := restarted.Snapshot(); s.WorkDurationMin != 45 {
 		t.Fatalf("work duration not persisted, got %d", s.WorkDurationMin)
@@ -226,7 +226,7 @@ func TestEngineDropsAbandonedProjects(t *testing.T) {
 	if _, err := database.GetOrCreateProject("testing"); err != nil {
 		t.Fatal(err)
 	}
-	restarted := NewEngine(database, "")
+	restarted := NewEngine(database)
 	defer restarted.Close()
 	if got := names(); len(got) != 1 || got[0] != "used" {
 		t.Errorf("expected leftovers pruned, got %v", got)

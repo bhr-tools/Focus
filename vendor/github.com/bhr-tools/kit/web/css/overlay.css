@@ -1,0 +1,231 @@
+/* Layers of js/overlay.js: popovers and menus, bottom sheets, modal dialogs
+   (full-screen pages on phones), toasts. Reads only the roles and scales of
+   base.css: an app restyles them by overriding those, or with its own rules
+   after this file. */
+
+/* ==========================================================================
+   Popover and menu
+   ========================================================================== */
+
+.popover {
+  position: fixed;
+  z-index: 1500;
+  max-width: min(340px, calc(100vw - 16px));
+  padding: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.popover.scrollable { max-height: 320px; }
+.sheet-head { display: contents; }
+.sheet-head > .sheet-title, .sheet-head > .icon-button { display: none; }
+.sheet-backdrop { position: fixed; inset: 0; z-index: 1400; background: var(--backdrop); }
+
+.menu { display: flex; flex-direction: column; gap: 1px; }
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: var(--control-h);
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font-size: var(--fs-md);
+  text-align: left;
+  transition: background-color 0.12s;
+}
+.menu-item:hover { background: var(--surface-hover); }
+.menu-item.selected { color: var(--accent); font-weight: 600; }
+.menu-item.danger { color: var(--danger); }
+.menu-item.danger:hover { background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.menu-item > .icon { color: var(--text-muted); }
+.menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-hint { color: var(--text-dim); font-size: var(--fs-xs); }
+.menu-separator { height: 1px; margin: 4px 2px; background: var(--border); }
+
+/* ==========================================================================
+   Modal
+   ========================================================================== */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--backdrop);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+.modal-overlay.open { opacity: 1; }
+
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: min(440px, 100%);
+  max-height: 88dvh;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  transform: translateY(8px) scale(0.98);
+  transition: transform 0.18s ease;
+}
+.modal:focus { outline: none; }
+.modal-overlay.open .modal { transform: none; }
+
+/* Desktop: title on the left, close (×) or the action on the right. */
+.modal-header { display: flex; align-items: center; gap: 8px; padding: 16px 14px 12px 20px; }
+.modal-title { flex: 1; min-width: 0; order: 0; font-size: var(--fs-lg); font-weight: 700; }
+.modal-close {
+  order: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h);
+  height: var(--control-h);
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+}
+.modal-close:hover { background: var(--surface-hover); color: var(--text); }
+.modal-close .close-text { display: none; }
+.modal-action { order: 1; height: var(--control-h); padding: 0 12px; border-radius: var(--r-sm); background: var(--accent); color: var(--on-accent); font-size: var(--fs-md); font-weight: 600; }
+.modal-action:disabled { opacity: 0.5; }
+.modal-spacer { display: none; }
+
+.modal-body { display: flex; flex-direction: column; gap: 14px; min-height: 0; padding: 0 20px 18px; overflow-y: auto; overscroll-behavior: contain; }
+.modal-header + .modal-body { padding-top: 2px; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }
+.dialog-message { color: var(--text-muted); font-size: var(--fs); }
+
+/* ==========================================================================
+   Toast
+   ========================================================================== */
+
+.toast {
+  position: fixed;
+  right: 24px;
+  bottom: 44px;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 10px 12px 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: var(--fs-md);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(10px);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast.open { opacity: 1; pointer-events: auto; transform: none; }
+.toast.error { border-color: var(--danger); color: var(--danger); }
+.toast.success { border-color: var(--accent); }
+.toast-message { flex: 1; min-width: 0; }
+.toast-action {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--select);
+  border-radius: var(--r-sm);
+  color: var(--select);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+.toast-action:hover { background: var(--select); color: var(--on-accent); }
+
+/* ==========================================================================
+   Phones
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  /* Popovers become bottom sheets with a title and a close button, above the
+     iOS keyboard (--vv-* are set in overlay.js). */
+  .popover.sheet {
+    inset: auto 0 0 0;
+    bottom: var(--vv-bottom, 0);
+    width: 100%;
+    max-width: none;
+    max-height: min(85dvh, var(--vv-height, 100dvh));
+    padding: 12px 14px calc(16px + env(safe-area-inset-bottom));
+    border-width: 1px 0 0;
+    border-radius: 18px 18px 0 0;
+    animation: kit-sheet-up 0.25s cubic-bezier(0.3, 1, 0.3, 1);
+  }
+  .sheet .sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 0 0 12px 4px; }
+  .sheet .sheet-head > .sheet-title { display: block; font-size: var(--fs-lg); font-weight: 700; }
+  .sheet .sheet-head > .icon-button { display: inline-flex; width: 30px; height: 30px; border-radius: var(--r-full); background: var(--fill); }
+  .sheet .menu-item { min-height: 46px; font-size: var(--fs-lg); }
+
+  /* Dialogs are full-screen pages pushed from the right: back on the left,
+     the title in the middle, the action on the right. The page follows the
+     visible area (keyboard), and being opaque leaves iOS 26 nothing to blur. */
+  .modal-overlay { align-items: stretch; padding: 0; top: var(--vv-top, 0); bottom: auto; height: var(--vv-height, 100%); background: transparent; }
+  .modal {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    margin: 0;
+    border: none;
+    border-radius: 0;
+    background: var(--bg);
+    box-shadow: -12px 0 24px rgba(0, 0, 0, 0.08);
+    transform: translateX(100%);
+    transition: transform 0.24s cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  .modal-overlay.open .modal { transform: none; }
+  .modal-overlay.dragging .modal { transition: none; }
+  .modal-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    flex-shrink: 0;
+    min-height: calc(48px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-close { order: 0; justify-self: start; width: auto; height: 44px; padding: 0 6px; color: var(--accent); font-size: var(--fs-lg); }
+  .modal-close:hover { background: none; color: var(--accent); }
+  .modal-close .close-text { display: inline-flex; align-items: center; gap: 2px; }
+  .modal-close > .icon-close { display: none; }
+  .modal.footer-closes .modal-close { visibility: hidden; }
+  .modal-title { order: 1; max-width: 52vw; overflow: hidden; font-size: var(--fs-lg); text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+  .modal-action, .modal-spacer { order: 2; justify-self: end; }
+  .modal-spacer { display: block; }
+  .modal-action { height: 44px; padding: 0 8px; background: transparent; color: var(--accent); font-size: var(--fs-lg); font-weight: 700; }
+  .modal-body { flex: 1; padding: 16px var(--gutter) 24px; }
+  .modal-header + .modal-body { padding-top: 16px; }
+  .modal-footer { flex-shrink: 0; padding: 8px var(--gutter) calc(8px + env(safe-area-inset-bottom)); }
+  .modal-footer .button { flex: 1; }
+
+  .toast { right: 16px; left: 16px; bottom: calc(16px + var(--tabbar-h, 0px) + env(safe-area-inset-bottom)); max-width: none; }
+  /* Above a page's bottom bar (Cancel / Save), never over it. */
+  body.has-modal .toast { bottom: calc(var(--vv-bottom, 0px) + 16px + env(safe-area-inset-bottom)); }
+  body.has-modal:has(.modal-footer) .toast { bottom: calc(var(--vv-bottom, 0px) + 76px + env(safe-area-inset-bottom)); }
+}
+
+@keyframes kit-sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: none; }
+}
+
+/* ==========================================================================
+   ? help (js/help.js)
+   ========================================================================== */
+
+.modal.help { width: min(680px, 100%); }
+.help-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 28px; }
+.help-title { margin: 10px 0 4px; font-size: var(--fs-sm); font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.help-group:first-child .help-title, .help-group:nth-child(2) .help-title { margin-top: 0; }
+.help-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: var(--fs-md); }
+.help-keys { display: flex; gap: 4px; }
+@media (max-width: 768px) { .help-grid { grid-template-columns: 1fr; } }

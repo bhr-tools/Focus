@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"crypto/pbkdf2"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -11,6 +12,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"net/http/httptest"
+
+	"github.com/bhr-tools/kit/auth"
 )
 
 func setupTestDB(t *testing.T) *DB {
@@ -137,9 +142,9 @@ func TestLegacySchemaMigration(t *testing.T) {
 	}
 	defer database.Close()
 
-	cols, err := database.columnNames("sessions")
-	if err != nil || !cols["uuid"] || !cols["updated_at"] {
-		t.Fatalf("expected uuid and updated_at columns, got %v (err %v)", cols, err)
+	var cols int
+	if err := database.conn.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name IN ('uuid', 'updated_at')`).Scan(&cols); err != nil || cols != 2 {
+		t.Fatalf("expected uuid and updated_at columns, got %d (err %v)", cols, err)
 	}
 	all, err := database.GetAllSessions()
 	if err != nil || len(all) != 1 {
@@ -149,8 +154,8 @@ func TestLegacySchemaMigration(t *testing.T) {
 		t.Errorf("legacy session not backfilled: %+v", all[0])
 	}
 	var n int
-	if err := database.conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'auth_sessions'`).Scan(&n); err != nil || n != 0 {
-		t.Errorf("legacy auth_sessions table should be dropped")
+	if err := database.conn.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('auth_sessions') WHERE name = 'expires_at'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("legacy auth_sessions table should be replaced by the kit's")
 	}
 	if _, err := database.RecordSession(Session{ProjectName: "NewOnMigrated", EndTime: time.Now(), DurationSeconds: 60}); err != nil {
 		t.Fatalf("RecordSession failed on migrated db: %v", err)
@@ -447,7 +452,6 @@ func TestSettingsArePrivate(t *testing.T) {
 	if err := database.SetSetting("password_hash", "x"); err == nil {
 		t.Fatal("password_hash must not be writable as a public setting")
 	}
-	_ = database.SetPasswordHash("secret-hash")
 	settings, _ := database.GetSettings()
 	for k := range settings {
 		if strings.Contains(k, "password") {
@@ -459,34 +463,79 @@ func TestSettingsArePrivate(t *testing.T) {
 	}
 }
 
-func TestPasswordHashing(t *testing.T) {
-	hash, err := HashPassword("correct horse")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !CheckPassword("correct horse", hash) || CheckPassword("wrong", hash) || IsLegacyHash(hash) {
-		t.Fatalf("PBKDF2 hash check failed")
-	}
-	// Legacy scheme: hex(salt) + "$" + hex(sha256(salt + password)).
-	sum := sha256.Sum256(append([]byte{0xab}, "pw"...))
-	legacy := "ab$" + hex.EncodeToString(sum[:])
-	if !IsLegacyHash(legacy) || !CheckPassword("pw", legacy) || CheckPassword("nope", legacy) {
-		t.Fatalf("legacy hash handling failed")
-	}
-}
+// A database of the last release before the kit: its password (current and
+// first hash formats), logins and connected apps work through kit/auth.
+func TestAuthMovesToKit(t *testing.T) {
+	for _, tc := range []struct{ name, hash string }{
+		{"pbkdf2", ""},
+		{"first", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "focus.db")
+			old, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			salt := []byte("0123456789abcdef")
+			var hash string
+			if tc.name == "pbkdf2" {
+				key, _ := pbkdf2.Key(sha256.New, "secret", salt, 1000, 32)
+				hash = fmt.Sprintf("pbkdf2-sha256$1000$%x$%x", salt, key)
+			} else {
+				sum := sha256.Sum256(append(append([]byte{}, salt...), "secret"...))
+				hash = fmt.Sprintf("%x$%x", salt, sum)
+			}
+			hashOf := func(token string) string { sum := sha256.Sum256([]byte(token)); return hex.EncodeToString(sum[:]) }
+			now := time.Now().Unix()
+			for _, q := range []string{
+				`CREATE TABLE sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT UNIQUE, project_name TEXT NOT NULL COLLATE NOCASE, mode TEXT NOT NULL,
+					start_time DATETIME NOT NULL, end_time DATETIME NOT NULL, duration_seconds INTEGER NOT NULL, completed INTEGER NOT NULL DEFAULT 1,
+					note TEXT DEFAULT '', updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`,
+				`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+				`CREATE TABLE auth_tokens (token_hash TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)`,
+				`CREATE TABLE app_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, used_at INTEGER)`,
+				fmt.Sprintf(`INSERT INTO settings VALUES ('password_hash', '%s'), ('work_duration', '45')`, hash),
+				fmt.Sprintf(`INSERT INTO auth_tokens VALUES ('%s', %d), ('%s', %d)`, hashOf("browser"), now+3600, hashOf("expired"), now-10),
+				fmt.Sprintf(`INSERT INTO app_tokens (name, token_hash, created_at, used_at) VALUES ('Project', '%s', %d, NULL)`, hashOf("project"), now-86400),
+			} {
+				if _, err := old.Exec(q); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			old.Close()
 
-func TestAuthTokens(t *testing.T) {
-	database := setupTestDB(t)
-	token, err := database.CreateAuthToken(time.Hour)
-	if err != nil || !database.ValidateAuthToken(token) {
-		t.Fatalf("fresh token should be valid (err %v)", err)
-	}
-	expired, _ := database.CreateAuthToken(-time.Second)
-	if database.ValidateAuthToken(expired) || database.ValidateAuthToken("") || database.ValidateAuthToken("bogus") {
-		t.Fatal("expired, empty and unknown tokens must be rejected")
-	}
-	_ = database.DeleteAuthToken(token)
-	if database.ValidateAuthToken(token) {
-		t.Fatal("deleted token still valid")
+			database, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			a, err := auth.New(database.SQL(), "focus_session", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok, _ := a.VerifyPassword("wrong"); ok {
+				t.Fatal("wrong password accepted")
+			}
+			if ok, err := a.VerifyPassword("secret"); !ok {
+				t.Fatalf("password lost (%v)", err)
+			}
+			if !a.ValidateSession("browser") || a.ValidateSession("expired") {
+				t.Fatal("logins not carried over")
+			}
+			r := httptest.NewRequest("GET", "/api/month", nil)
+			r.Header.Set("Authorization", "Bearer project")
+			if tok := a.RequestAppToken(r); tok == nil || tok.Name != "Project" || tok.Scope != "read" {
+				t.Fatalf("connected app lost: %+v", tok)
+			}
+			if settings, _ := database.GetSettings(); settings[SettingWorkDuration] != "45" {
+				t.Fatalf("settings lost: %v", settings)
+			}
+			var n int
+			database.conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN ('auth_tokens', 'app_tokens')`).Scan(&n)
+			database.conn.QueryRow(`SELECT COUNT(*) + ? FROM settings WHERE key = 'password_hash'`, n).Scan(&n)
+			if n != 0 {
+				t.Fatal("old auth rows left behind")
+			}
+		})
 	}
 }

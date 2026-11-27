@@ -12,23 +12,59 @@ import (
 	"testing"
 	"time"
 
-	"focus/internal/db"
-	"focus/internal/timer"
-	"focus/web"
+	"github.com/bhr-tools/kit/auth"
+	kitserver "github.com/bhr-tools/kit/server"
+
+	"github.com/bhr-tools/focus/internal/db"
+	"github.com/bhr-tools/focus/internal/timer"
+	"github.com/bhr-tools/focus/web"
 )
 
-func setupTestServer(t *testing.T) (http.Handler, *db.DB) {
+// setupTestServer serves the API and the web app as focus-server does,
+// without a password until a test sets one.
+func setupTestServer(t *testing.T) (http.Handler, *db.DB, *auth.Auth) {
 	t.Helper()
+	auth.FailedLoginDelay = 0
 	database, err := db.Open(filepath.Join(t.TempDir(), "test_server.db"))
 	if err != nil {
 		t.Fatalf("failed to open test db: %v", err)
 	}
-	engine := timer.NewEngine(database, "")
+	a, err := auth.New(database.SQL(), SessionCookie, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := timer.NewEngine(database)
 	t.Cleanup(func() {
 		engine.Close()
 		database.Close()
 	})
-	return NewServer(database, engine, web.Files, "local-secret").Handler(), database
+	api := NewServer(database, engine, web.Files, a)
+	return kitserver.Handler(kitserver.Options{API: api.Handler(), Web: web.Files}), database, a
+}
+
+// locked sets a password and returns the header of a command-line token.
+func locked(t *testing.T, a *auth.Auth) []string {
+	t.Helper()
+	if err := a.SetInitialPassword("pw12"); err != nil {
+		t.Fatal(err)
+	}
+	token, err := a.CreateAppToken("test", scopeCLI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []string{"Authorization", "Bearer " + token}
+}
+
+// cookieOf is the session cookie a response sets, as a request header.
+func cookieOf(t *testing.T, w *httptest.ResponseRecorder) []string {
+	t.Helper()
+	for _, c := range w.Result().Cookies() {
+		if c.Name == SessionCookie && c.Value != "" {
+			return []string{"Cookie", SessionCookie + "=" + c.Value}
+		}
+	}
+	t.Fatalf("no session cookie: %v", w.Header())
+	return nil
 }
 
 // call performs a request and returns the recorder; body may be nil, a string or any JSON value.
@@ -62,7 +98,7 @@ func decode[T any](t *testing.T, w *httptest.ResponseRecorder) T {
 }
 
 func TestAPISessionsCRUD(t *testing.T) {
-	h, database := setupTestServer(t)
+	h, database, _ := setupTestServer(t)
 	now := time.Now().UTC().Truncate(time.Second)
 
 	w := call(t, h, http.MethodPost, "/api/sessions", map[string]any{
@@ -133,7 +169,7 @@ func TestParseFlexibleTime(t *testing.T) {
 }
 
 func TestAPISessionsResilient(t *testing.T) {
-	h, database := setupTestServer(t)
+	h, database, _ := setupTestServer(t)
 	nowMilli := time.Now().UnixMilli()
 
 	cases := []struct {
@@ -164,62 +200,76 @@ func TestAPISessionsResilient(t *testing.T) {
 	}
 }
 
+// The browser signs in with the password (cookie); the command line gets a
+// lasting token from a signed-in session; a login token saved by an older
+// command line still works until it expires.
 func TestAuthFlow(t *testing.T) {
-	h, _ := setupTestServer(t)
+	h, _, a := setupTestServer(t)
 
 	// No password yet: the API is open.
 	if w := call(t, h, http.MethodGet, "/api/state", nil); w.Code != http.StatusOK {
 		t.Fatalf("open API: expected 200, got %d", w.Code)
 	}
-
-	w := call(t, h, http.MethodPost, "/api/auth/setup", map[string]string{"password": " s3cret "})
+	w := call(t, h, http.MethodPost, "/api/auth/setup", map[string]string{"password": "s3cret"})
 	if w.Code != http.StatusOK {
 		t.Fatalf("setup: %d %s", w.Code, w.Body.String())
 	}
-	token := decode[map[string]any](t, w)["token"].(string)
-	if w := call(t, h, http.MethodPost, "/api/auth/setup", map[string]string{"password": "other"}); w.Code != http.StatusConflict {
-		t.Errorf("second setup: expected 409, got %d", w.Code)
-	}
-
+	browser := cookieOf(t, w)
 	if w := call(t, h, http.MethodGet, "/api/state", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("locked API: expected 401, got %d", w.Code)
 	}
-	for _, hdr := range [][]string{
-		{"Authorization", "Bearer " + token},
-		{"X-Focus-Token", token},
-		{"Cookie", "focus_session=" + token},
-		{"Authorization", "Bearer local-secret"},
-	} {
-		if w := call(t, h, http.MethodGet, "/api/state", nil, hdr...); w.Code != http.StatusOK {
-			t.Errorf("auth via %s: expected 200, got %d", hdr[0], w.Code)
-		}
-	}
-
-	if w := call(t, h, http.MethodPost, "/api/auth/login", map[string]string{"password": "s3cret"}); w.Code != http.StatusOK {
-		t.Errorf("login (trimmed password): expected 200, got %d", w.Code)
+	if w := call(t, h, http.MethodGet, "/api/state", nil, browser...); w.Code != http.StatusOK {
+		t.Fatalf("browser session: %d", w.Code)
 	}
 	if w := call(t, h, http.MethodPost, "/api/auth/login", map[string]string{"password": "nope"}); w.Code != http.StatusUnauthorized {
 		t.Errorf("wrong password: expected 401, got %d", w.Code)
 	}
 
-	w = call(t, h, http.MethodPost, "/api/auth/change-password",
-		map[string]string{"old_password": "s3cret", "new_password": "n3w"}, "Authorization", "Bearer "+token)
+	// focus login: password, then a token from the signed-in session.
+	w = call(t, h, http.MethodPost, "/api/auth/login", map[string]string{"password": "s3cret"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, "/api/cli-token", map[string]string{"name": "laptop"}); w.Code != http.StatusUnauthorized {
+		t.Fatalf("token without login: %d", w.Code)
+	}
+	w = call(t, h, http.MethodPost, "/api/cli-token", map[string]string{"name": "laptop"}, cookieOf(t, w)...)
+	if w.Code != http.StatusOK {
+		t.Fatalf("cli token: %d %s", w.Code, w.Body.String())
+	}
+	cli := []string{"Authorization", "Bearer " + decode[map[string]string](t, w)["token"]}
+	if w := call(t, h, http.MethodPost, "/api/action", map[string]string{"action": "start", "mode": "free"}, cli...); w.Code != http.StatusOK {
+		t.Fatalf("cli action: %d", w.Code)
+	}
+	if w := call(t, h, http.MethodPost, "/api/cli-token", map[string]string{"name": "x"}, cli...); w.Code != http.StatusUnauthorized {
+		t.Fatalf("a token must not mint tokens: %d", w.Code)
+	}
+
+	// A login token of the old command line, carried over as a session.
+	old, err := a.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := call(t, h, http.MethodGet, "/api/state", nil, "Authorization", "Bearer "+old); w.Code != http.StatusOK {
+		t.Fatalf("old cli login: %d", w.Code)
+	}
+
+	// A new password signs every browser out; the command line stays connected.
+	w = call(t, h, http.MethodPost, "/api/auth/change-password", map[string]string{"old_password": "s3cret", "new_password": "n3w!"}, browser...)
 	if w.Code != http.StatusOK {
 		t.Fatalf("change password: %d %s", w.Code, w.Body.String())
 	}
-	newToken := decode[map[string]any](t, w)["token"].(string)
-	if w := call(t, h, http.MethodGet, "/api/state", nil, "Authorization", "Bearer "+token); w.Code != http.StatusUnauthorized {
-		t.Errorf("old tokens must be revoked after a password change, got %d", w.Code)
+	if w := call(t, h, http.MethodGet, "/api/state", nil, browser...); w.Code != http.StatusUnauthorized {
+		t.Errorf("old browser session after a password change: %d", w.Code)
 	}
-	if w := call(t, h, http.MethodGet, "/api/state", nil, "Authorization", "Bearer "+newToken); w.Code != http.StatusOK {
-		t.Errorf("new token rejected: %d", w.Code)
+	if w := call(t, h, http.MethodGet, "/api/state", nil, cli...); w.Code != http.StatusOK {
+		t.Errorf("cli token after a password change: %d", w.Code)
 	}
 }
 
 func TestSettingsHidePassword(t *testing.T) {
-	h, database := setupTestServer(t)
-	_ = database.SetPasswordHash("hash")
-	auth := []string{"Authorization", "Bearer local-secret"}
+	h, _, a := setupTestServer(t)
+	auth := locked(t, a)
 
 	w := call(t, h, http.MethodGet, "/api/settings", nil, auth...)
 	if strings.Contains(w.Body.String(), "password") {
@@ -238,7 +288,7 @@ func TestSettingsHidePassword(t *testing.T) {
 }
 
 func TestActionsAndMethods(t *testing.T) {
-	h, _ := setupTestServer(t)
+	h, _, _ := setupTestServer(t)
 	w := call(t, h, http.MethodPost, "/api/action", map[string]string{"action": "start", "project": "CLI", "mode": "free"})
 	if snap := decode[timer.StateSnapshot](t, w); snap.State != "free-running" || snap.Project != "cli" {
 		t.Fatalf("unexpected snapshot %+v", snap)
@@ -258,7 +308,7 @@ func TestActionsAndMethods(t *testing.T) {
 }
 
 func TestImportExportRoundTrip(t *testing.T) {
-	h, _ := setupTestServer(t)
+	h, _, _ := setupTestServer(t)
 	csvData := "Project,Start Time,End Time,Duration (seconds)\nMaths,2026-01-05T09:00:00Z,2026-01-05T10:00:00Z,3600\n"
 	w := call(t, h, http.MethodPost, "/api/import", csvData, "Content-Type", "text/csv")
 	if res := decode[map[string]any](t, w); res["imported"] != float64(1) {
@@ -276,7 +326,7 @@ func TestImportExportRoundTrip(t *testing.T) {
 }
 
 func TestRenameProjectFollowedByTimer(t *testing.T) {
-	h, database := setupTestServer(t)
+	h, database, _ := setupTestServer(t)
 	now := time.Now()
 	if _, err := database.RecordSession(db.Session{ProjectName: "Old", EndTime: now, DurationSeconds: 60}); err != nil {
 		t.Fatal(err)
@@ -313,10 +363,8 @@ func TestVirtualMP3Reader(t *testing.T) {
 // An app is connected by the user, reads the month view only, and is
 // disconnected by the user or by itself.
 func TestConnectApp(t *testing.T) {
-	h, database := setupTestServer(t)
-	hash, _ := db.HashPassword("pw")
-	_ = database.SetPasswordHash(hash)
-	user := []string{"Authorization", "Bearer local-secret"}
+	h, _, a := setupTestServer(t)
+	user := locked(t, a)
 	back := "https://assistant.example.com/api/focus/callback"
 
 	if w := call(t, h, http.MethodPost, "/api/connect", map[string]string{"app": "Assistant", "redirect_uri": back}); w.Code != http.StatusUnauthorized {
@@ -354,8 +402,8 @@ func TestConnectApp(t *testing.T) {
 		t.Fatalf("app writes: %d", w.Code)
 	}
 
-	apps := decode[[]db.App](t, call(t, h, http.MethodGet, "/api/apps", nil, user...))
-	if len(apps) != 1 || apps[0].Name != "Assistant" || apps[0].UsedAt == "" {
+	apps := decode[[]auth.AppToken](t, call(t, h, http.MethodGet, "/api/apps", nil, user...))
+	if len(apps) != 2 || apps[0].Name != "Assistant" || apps[0].Scope != scopeRead || apps[0].UsedAt == nil {
 		t.Fatalf("apps: %+v", apps)
 	}
 	if w := call(t, h, http.MethodDelete, fmt.Sprintf("/api/apps/%d", apps[0].ID), nil, user...); w.Code != http.StatusOK {
@@ -371,7 +419,7 @@ func TestConnectApp(t *testing.T) {
 	if w := call(t, h, http.MethodDelete, "/api/connect", nil, app...); w.Code != http.StatusOK {
 		t.Fatalf("leave: %d", w.Code)
 	}
-	if apps := decode[[]db.App](t, call(t, h, http.MethodGet, "/api/apps", nil, user...)); len(apps) != 0 {
+	if apps := decode[[]auth.AppToken](t, call(t, h, http.MethodGet, "/api/apps", nil, user...)); len(apps) != 1 {
 		t.Fatalf("apps after leaving: %+v", apps)
 	}
 }

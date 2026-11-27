@@ -132,7 +132,9 @@ async function api(path, { method = 'GET', body, raw = false } = {}) {
   }
   if (!res.ok) {
     const text = (await res.text()).trim();
-    throw new Error(text || `${res.status} ${res.statusText}`);
+    let message = text;
+    try { message = JSON.parse(text).error || text; } catch { /* plain text */ }
+    throw new Error(message || `${res.status} ${res.statusText}`);
   }
   return raw ? res : res.json();
 }
@@ -1045,7 +1047,7 @@ function renderStats(stats) {
       <tbody>${stats.projects.map((p, i) => `
         <tr>
           <td><button type="button" class="project-cell" data-index="${i}" title="Rename everywhere">
-            <span class="color-dot" style="background-color:${escapeHtml(p.color)}"></span>
+            <span class="color-dot" data-color="${escapeHtml(p.color)}"></span>
             <span class="project-cell-name">${escapeHtml(p.project_name)}</span>
             <svg class="edit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>
           </button></td>
@@ -1055,6 +1057,8 @@ function renderStats(stats) {
           <td class="num optional">${formatDuration(p.average_duration_seconds)}</td>
         </tr>`).join('')}
       </tbody>`;
+    // Colours set from script: the page allows no inline style.
+    table.querySelectorAll('.color-dot[data-color]').forEach((dot) => { dot.style.backgroundColor = dot.dataset.color; });
     table.querySelectorAll('.project-cell').forEach((btn) => {
       btn.addEventListener('click', () => openRenameDialog(stats.projects[Number(btn.dataset.index)].project_name));
     });

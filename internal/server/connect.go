@@ -3,12 +3,15 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bhr-tools/kit/httpx"
 )
 
 // Connecting an app (the Assistant…) to Focus, in the manner of OAuth:
@@ -100,7 +103,7 @@ func (s *Server) handleConnectToken(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unknown or expired code: connect again", http.StatusBadRequest)
 		return
 	}
-	token, err := s.db.CreateAppToken(p.app)
+	token, err := s.auth.CreateAppToken(p.app, scopeRead)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -110,20 +113,21 @@ func (s *Server) handleConnectToken(w http.ResponseWriter, r *http.Request) {
 
 // handleDisconnectSelf lets an app give its token back.
 func (s *Server) handleDisconnectSelf(w http.ResponseWriter, r *http.Request) {
-	tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if tok == "" {
+	t := s.auth.RequestAppToken(r)
+	if t == nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if err := s.db.DeleteAppToken(tok); err != nil {
+	if err := s.auth.DeleteAppToken(t.ID); err != nil {
 		serverError(w, err)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+// handleListApps lists the connected apps and command lines.
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
-	apps, err := s.db.ListApps()
+	apps, err := s.auth.AppTokens()
 	if err != nil {
 		serverError(w, err)
 		return
@@ -137,24 +141,30 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unknown app", http.StatusBadRequest)
 		return
 	}
-	if err := s.db.DeleteApp(id); err != nil {
+	if err := s.auth.DeleteAppToken(id); err != nil && !errors.Is(err, httpx.ErrNotFound) {
 		serverError(w, err)
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
-// appAuthed lets a connected app's token through on the routes it may read,
-// and the user's own credentials everywhere.
-func (s *Server) appAuthed(next http.HandlerFunc) http.HandlerFunc {
-	user := s.authed(next)
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && appReadable[r.URL.Path] {
-			if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && s.db.UseAppToken(tok) {
-				next(w, r)
-				return
-			}
-		}
-		user(w, r)
+// handleCLIToken gives `focus login` a lasting token, named after the
+// machine; the user revokes it with the connected apps.
+func (s *Server) handleCLIToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
 	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" || len(name) > 60 {
+		name = "Command line"
+	}
+	token, err := s.auth.CreateAppToken(name, scopeCLI)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, map[string]string{"token": token})
 }
